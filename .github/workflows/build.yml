@@ -31,7 +31,7 @@ jobs:
 
       - name: Build
         shell: cmd
-        run: cmake --build build --target pulse --config Release
+        run: cmake --build build --target pulse pulse_launcher pulse_dialog_auto pulse_dialog_auto_control pulse_dialog_launcher pulse_file_dialog_ui_proof_runtime pulse_picker_ui_proof pulse_dialog_bundle_test --config Release
 
       - name: Release payload checks
         shell: pwsh
