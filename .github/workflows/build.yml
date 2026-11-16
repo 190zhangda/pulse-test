@@ -12,14 +12,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Add msbuild to PATH
-        uses: microsoft/setup-msbuild@v2
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
 
       - name: Configure
         shell: cmd
-        run: |
-          call "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
-          cmake -S . -B build -G Ninja ^
+        run: cmake -S . -B build -G Ninja ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ^
             -DPULSE_WITH_SELFTEST=OFF ^
@@ -33,9 +31,7 @@ jobs:
 
       - name: Build
         shell: cmd
-        run: |
-          call "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
-          cmake --build build --target pulse --config Release
+        run: cmake --build build --target pulse --config Release
 
       - name: Release payload checks
         shell: pwsh
@@ -51,9 +47,7 @@ jobs:
 
       - name: Pack installer
         shell: cmd
-        run: |
-          call "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
-          call scripts\pack_setup.bat build
+        run: scripts\pack_setup.bat build
 
       - name: Sign update manifest
         env:
