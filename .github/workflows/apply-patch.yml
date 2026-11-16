@@ -1,0 +1,39 @@
+name: apply-patch-and-build
+
+# Manual trigger. Re-applies the patch payload (custom-patch/files/**) over
+# the current tree, commits the result, and kicks off build-pulse (which also
+# auto-triggers on push).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  patch:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply patch payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = $env:GITHUB_WORKSPACE
+          $src = Join-Path $root 'custom-patch\files'
+          $count = 0
+          Get-ChildItem $src -Recurse -File | ForEach-Object {
+            $rel = $_.FullName.Substring($src.Length + 1)
+            $dst = Join-Path $root $rel
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
+            Copy-Item $_.FullName $dst -Force
+            $count++
+            Write-Host "patched $rel"
+          }
+          Write-Host "::notice::applied $count patch files"
+
+      - name: Commit patched tree
+        shell: bash
+        run: |
+          git config user.name "pulse-patch-bot"
+          git config user.email "actions@localhost"
+          git add -A
+          git diff --cached --quiet && echo "no changes" || (git commit -m "apply custom patch" && git push)

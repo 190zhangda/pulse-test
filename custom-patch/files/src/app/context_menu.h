@@ -1,0 +1,342 @@
+// context_menu.h — Built-in Fluent context menu verbs (stage 1B-2).
+//
+// Built-in verbs only; third-party IContextMenu stays in pulse_shell and is
+// out of scope for 1B-2 (plan.md §11 pit 6). Item construction is windowless
+// so the console self-test can assert the verb list, hit-test and dispatch
+// without a GUI.
+#pragma once
+#include <functional>
+#include "../ui/fluent_menu.h"
+#include "../ui/view_layout.h"
+#include "../ui/ui_view_model.h"
+#include "context_menu_prefs.h"
+#include "../index/index_types.h"
+#include <string>
+
+namespace pulse::app {
+
+// Command ids returned by FluentMenu::TrackPopup for the built-in verbs.
+enum MenuCmd : int {
+    CmdNone = 0,
+    CmdOpen = 1,
+    CmdCut,
+    CmdCopy,
+    CmdPaste,
+    CmdDelete,
+    CmdRename,
+    CmdProperties,
+    CmdOpenTerminal,
+    CmdCopyPath,        // Ctrl+Shift+C
+    CmdUndo,            // Ctrl+Z
+    CmdNewFolder,
+    CmdNewTextFile,
+    CmdCopyAsPath,      // unused alias guard — keep ids stable
+    CmdOpenPath,        // search results: reveal in containing folder
+    CmdOpenInNewTab,    // folder: open selection in a new tab
+    CmdSelectAll,
+    CmdInvertSelection,
+    CmdSelectWildcard,
+    CmdRefresh,
+    CmdFolderProperties,
+    CmdSortName,
+    CmdSortModified,
+    CmdSortType,
+    CmdSortSize,
+    CmdSortPath,
+    CmdSortAscending,
+    CmdSortDescending,
+    CmdFolderSortTop,     // 文件夹优先：始终置顶
+    CmdFolderSortFollow,  // 文件夹优先：置底
+    CmdFolderSortMixed,   // 文件夹优先：与文件混排
+    CmdSortCreated = 31,  // 排序方式：创建日期
+    CmdSortAccessed = 32, // 排序方式：访问日期
+    CmdLayoutSingle = 50,
+    CmdLayoutTwoVertical,
+    CmdLayoutTwoHorizontal,
+    CmdLayoutThree,
+    CmdLayoutFourGrid,
+    CmdCopyToTarget,
+    CmdMoveToTarget,
+    CmdPinWorkspace,
+    CmdPinNetwork,
+    CmdSearchAll,           // palette: open pulse:search: as a folder
+    CmdInstallFullIndex,    // palette: UAC-install PulseIndex service
+    CmdSettings,            // palette / title-bar gear → settings tab
+    CmdSettingsContextMenu, // 管理右键项… → 右键菜单 page
+    CmdTags,
+    CmdTagBase = 70,        // + favorite slot - 1 (Alt+Shift+1..9)
+    CmdViewBase = 80,       // + ViewModeIndex (8 stable view choices)
+    CmdViewWall = 88,       // view menu: photo wall (the icon view arranged as a wall)
+    CmdTabColorBase = 90,   // +0..7  tab-group color swatches
+    CmdTabGroupNewTab = 98,
+    CmdTabGroupUngroup,
+    CmdTabGroupClose,
+    CmdDetailsPanel,        // view menu: right details panel toggle
+    CmdDetailsComputeSize,  // details "更多": compute folder size in place
+    CmdDetailsShellMenu,    // details "更多": open the Explorer context menu
+    CmdTabNewRight,         // tab menu: new tab to the right
+    CmdTabDuplicate,        // tab menu: duplicate this tab
+    CmdTabPin,              // tab menu: pin/unpin toggle
+    CmdTabClose,            // tab menu: close this tab
+    CmdTabAddToNewGroup,    // tab menu: create a group with this tab
+    CmdTabRemoveFromGroup,  // tab menu: leave the group (group survives)
+    CmdTabCloseOthers,
+    CmdTabCloseRight,
+    CmdTabRename,
+    CmdTabNameSave,
+    CmdTabNameReset,
+    CmdTabColorNone,
+    CmdTabJoinGroupBase = 130, // + index into WindowTabs::tab_groups (clear of 98-129)
+    CmdEditStarBadge = 170,
+    CmdRemoveStarred,
+    CmdRemoveRecent,
+    CmdBatchRename,
+    CmdAdvancedSearch,
+    CmdRestoreRecycle,
+    CmdEmptyRecycle,
+    CmdOpenRecycle,
+    CmdPinQuickAccess,
+    CmdUnpinQuickAccess,
+    CmdViewRecentChanges = 180,
+    CmdColumnLayout = 181,
+    CmdShortcutHelp = 182,
+    CmdCompareSideBySide = 183, // two folders selected: split + compare
+    CmdCompareToggle = 184,     // split menu: compare the two panes
+    CmdCompareDiffOnly = 185,   // split menu: differences only
+    CmdGroupNone = 186,         // "group by" submenu: none / name / date / type / size
+    CmdGroupName = 187,
+    CmdGroupDate = 188,
+    CmdGroupType = 189,
+    CmdGroupSize = 190,
+    CmdGroupTag = 191,          // = CmdGroupNone + GroupBy::Tag
+    CmdGroupLocation = 192,     // = CmdGroupNone + GroupBy::Location
+    CmdRestoreAllRecycle = 193, // recycle background: restore every listed item
+    CmdApplyViewToAllFolders = 194, // view menu: this view + sort become every folder's default
+    CmdApplyGroupToAllFolders = 195, // group menu: this grouping becomes every folder's default (#75)
+    CmdCustomizeToolbar = 197,  // toolbar More / New menu: 自定义工具栏 sheet
+    CmdNewMarkdownFile = 198,   // New menu: 新建 Markdown 文档
+    CmdExitPulse = 196,         // palette: quit even when closing keeps Pulse running (#57)
+    CmdRecentBase = 200,
+    // Drive and network verbs (selection_caps.h / drive_verbs.h), clear of the
+    // palette range above CmdIndexBase and of CmdShellNewBase.
+    CmdEjectDrive = 3900,       // removable / optical / USB drive: 弹出
+    CmdDisconnectDrive = 3901,  // mapped network drive: 断开连接
+    CmdUnlockDrive = 3902,      // BitLocker-locked drive: 解锁
+    CmdMapNetworkDrive = 3903,  // a share, or This PC background: 映射网络驱动器
+    CmdUnpinNetwork = 3904,     // Network view: remove the selected pins
+    CmdCompressZip = 3905,      // toolbar 压缩: the selection into a .zip beside it
+    CmdToggleFolderSizes = 3906, // toolbar 文件夹大小: size folders on their own (AppPrefs::folder_size_auto)
+    CmdStageToTray = 3907,      // 加入暂存区 (Ctrl+Shift+S): the selection onto the staging tray
+    CmdCloudKeep = 3908,        // Cloud Files selection: 始终保留在此设备上 (fs/cloud_pin.h)
+    CmdCloudFree = 3909,        // Cloud Files selection: 释放空间
+    CmdGroupIntoFolder = 3910,  // 2+ items: 合并到文件夹 (macOS New Folder with Selection)
+    CmdDissolveFolder = 3911,   // folders only: 解散文件夹 (contents up one level, folder removed)
+    CmdSetAlias = 3912,         // one item: 设置别名… (Shift+F2)
+    CmdAliasDisplayBase = 3913, // 查看 menu: +AliasDisplay (别名 + 原名 / 只显示别名 / 显示原名)
+    CmdManageAliases = 3916,    // 查看 menu: 管理别名… (list, remove, export, import)
+    CmdExportAliases = 3917,
+    CmdImportAliases = 3918,
+    CmdAliasBase = 3920,        // omnibar: +0..15 aliased folders matching the query
+    CmdAliasOpenBase = 3940,    // 管理别名: +0..29 open the item
+    CmdAliasRemoveBase = 3970,  // 管理别名: +0..29 remove the alias (row's trailing ×)
+    CmdIndexBase = 1000,
+    // Explorer integration (优化.md §7): registry static verbs bound to the
+    // current selection (+index into the StaticVerb list) and pulse_shell
+    // IContextMenu session items (+host menu id, up to 0x7FFF).
+    // Item menu "复制到窗口 / 移动到窗口" (M6e): + index into the other windows listed.
+    // Toolbar New menu: + index into the 新建 (ShellNew) entries listed.
+    CmdShellNewBase = 4000,
+    CmdCopyToWindowBase = 5000,
+    CmdMoveToWindowBase = 5032,
+    // Selection chip ⋯: 用 <pinned app> 打开 (+ index into AppPrefs::toolbar_apps)
+    // and 固定到工具栏 ▸ <suggested app> (+ index into the suggestions listed).
+    CmdToolbarAppBase = 5100,
+    CmdToolbarPinAppBase = 5120,
+    // Toolbar toggle tools (toolbar_tools.h): + index into kToolbarToolIds.
+    CmdToolbarToolBase = 5300,
+    CmdToolbarToolEnd = 5400,
+    // New menu ▸ 「新建」按钮的主操作: + AppPrefs::toolbar_new_primary (0..2).
+    CmdNewPrimaryBase = 5180,
+    // Network page (app_network_page.h): 连接服务器 and its ▾ menu, 最近访问.
+    CmdConnectServer = 5190,
+    CmdForgetNetworkRecent = 5191,
+    CmdAddNetworkPlace = 5192,
+    CmdLanRescan = 5193,
+    CmdNetworkSharingSettings = 5194,
+    CmdRenameNetwork = 5195,             // a pinned network location's display name
+    CmdNetworkClearRecent = 5196,        // ⋯ 清除最近访问
+    CmdNetworkHiddenShares = 5197,       // ⋯ 显示隐藏共享 (toggle)
+    CmdNetworkDiscoverySettings = 5198,  // ⋯ 局域网发现设置… (Settings → 文件操作)
+    // Task 46: 查找重复文件 (dup_finder.h) and AI 整理此文件夹… (folder background, palette).
+    CmdFindDuplicates = 5200,
+    CmdAiOrganizeHere = 5201,
+    CmdDupKeepThis = 5202,               // 重复文件 tab row: 只保留这份
+    CmdDupReapplyRules = 5203,           // 重复文件 tab row: 按规则重新标
+    CmdShellStaticBase = 6000,
+    CmdShellComBase = 8000,
+    CmdShellComLast = CmdShellComBase + 0x7FFF, // live and predicted Shell menu IDs
+};
+
+// One merged Explorer row (registry static verb or pulse_shell COM item),
+// already mapped to its final command id. Software-owned submenus keep one
+// level: command 0 + non-empty children => flyout header row.
+struct ShellMenuEntry {
+    int command = 0;
+    std::wstring text;
+    bool enabled = true;
+    std::vector<ShellMenuEntry> children;
+    std::wstring verb;      // canonical verb when known (registry / GetCommandString)
+    bool from_com = false;  // pulse_shell IContextMenu row (vs registry static)
+    std::wstring clsid;     // handler CLSID when known ("{guid}")
+    std::wstring handler;   // handler display name for the settings catalog
+    wchar_t mnemonic = 0;   // access key from the Explorer label ("&X"), 0 = none
+    common::MenuIconRef icon;  // app icon (handler bitmap / verb Icon value)
+};
+
+// Explorer's access keys for the built-in rows that mirror its own verbs
+// (shell32 labels: 打开(O) 剪切(T) 复制(C) 粘贴(P) 删除(D) 重命名(M) 属性(R)
+// 撤消(U) 复制为路径(A) 刷新(E) 还原(E) 清空回收站(B)). 0 = no access key.
+inline wchar_t BuiltinMenuMnemonic(int command) {
+    switch (command) {
+    case CmdOpen: return L'O';
+    case CmdCut: return L'T';
+    case CmdCopy: return L'C';
+    case CmdPaste: return L'P';
+    case CmdDelete: return L'D';
+    case CmdRename: return L'M';
+    case CmdProperties:
+    case CmdFolderProperties: return L'R';
+    case CmdUndo: return L'U';
+    case CmdCopyPath: return L'A';
+    case CmdRefresh:
+    case CmdRestoreRecycle: return L'E';
+    case CmdEmptyRecycle: return L'B';
+    default: return 0;
+    }
+}
+
+// Context menu for a selected entry: 打开 + icon strip (cut/copy/delete/
+// rename) + built-in verbs + undo. Explorer rows are appended afterwards via
+// AppendShellSection (they grow the menu downward so open rows never move).
+std::vector<ui::FluentMenuItem> BuildItemMenu(bool can_undo, const std::wstring& undo_label,
+                                              bool folder = false);
+
+// Which settings switch owns a built-in row (BuiltinMenuItem::Count: none,
+// the row always stays).
+BuiltinMenuItem BuiltinItemForCommand(int command);
+// Drops the built-in rows the user hid on the 右键菜单 page from an item or
+// background menu, before the Explorer section is appended. A dropped row's
+// separator moves to the row above it, so groups stay apart without doubling.
+// With a surface, the movable rows first take the user's order for it: they
+// trade places among the slots they occupy and each slot keeps its separator.
+void ApplyBuiltinMenuPrefs(std::vector<ui::FluentMenuItem>& items,
+                           const ContextMenuPrefs& prefs,
+                           BuiltinMenuSurface surface = BuiltinMenuSurface::Count);
+
+struct Tab;
+// Uses snapshot metadata only; never probes the filesystem on the UI thread.
+std::wstring RecentChangesMenuPath(const Tab& tab, bool background);
+void AppendRecentChangesCommand(std::vector<ui::FluentMenuItem>& items,
+                                const std::wstring& path);
+
+// Appends the merged Explorer section at the very bottom: separator, then one
+// row per entry. Software submenus become one-level flyout headers (children
+// on FluentMenuItem); other rows stay flat. Drops entries whose text
+// duplicates an existing row (case-insensitive). Hard safety cap is 48; the
+// user-facing default (32) is applied earlier by ApplyExplorerPrefs.
+void AppendShellSection(std::vector<ui::FluentMenuItem>& items,
+                        const std::vector<ShellMenuEntry>& entries);
+
+// Factory denylist + per-item overrides + compress-into-flyout + order + cap.
+// Host still returns the full list; call this in the UI process.
+std::vector<ShellMenuEntry> ApplyExplorerPrefs(const ContextMenuPrefs& prefs,
+                                               const std::vector<ShellMenuEntry>& entries);
+
+inline constexpr int kMaxShellNewItems = 64;
+static_assert(CmdIndexBase + 48 <= CmdShellNewBase && CmdShellNewBase + kMaxShellNewItems <= CmdCopyToWindowBase);
+
+// Other windows' shown folders, most recently used window first (M6e).
+inline constexpr size_t kMaxWindowTransferTargets = 32;
+static_assert(CmdCopyToWindowBase + kMaxWindowTransferTargets <= CmdMoveToWindowBase &&
+              CmdMoveToWindowBase + kMaxWindowTransferTargets <= CmdShellStaticBase);
+// Two flyouts, "复制到窗口" and "移动到窗口", one row per folder (its name, then
+// the full path, also its tooltip), right before 复制路径. Nothing without targets; 移动到窗口
+// stays visible but disabled when the selection cannot move.
+void AppendWindowTransferCommands(std::vector<ui::FluentMenuItem>& items,
+                                  const std::vector<std::wstring>& folders, bool can_move);
+
+// Context menu for empty list space (creation / paste / terminal / undo).
+std::vector<ui::FluentMenuItem> BuildBackgroundMenu(bool can_paste, bool can_undo,
+                                                    const std::wstring& undo_label);
+struct BackgroundViewOptions {
+    ui::ViewMode view_mode = ui::ViewMode::Details;
+    ui::SortColumn sort_column = ui::SortColumn::Name;
+    ui::SortDirection sort_direction = ui::SortDirection::Asc;
+    int folder_sort = 0; // 0 folders first, 1 folders last, 2 mixed
+    bool wall = false;   // the icon view is a photo wall
+    bool details_panel = false;
+    bool can_sort = true;
+    bool indexed_search = false;
+    bool show_path = false;
+    bool filesystem = true;
+    int group_by = 0;        // app::GroupBy value
+    bool can_group = false;  // real folders, Recent, search results, tag views
+    bool group_virtual = false; // multi-folder view (search, tag, recycle): Location instead of Tag
+    bool can_apply_group_all = false; // real folder: offer "apply grouping to all folders"
+};
+void AppendBackgroundViewCommands(std::vector<ui::FluentMenuItem>& items,
+                                  const BackgroundViewOptions& options);
+std::vector<ui::FluentMenuItem> BuildSortMenu(const BackgroundViewOptions& options);
+// "Group by" submenu item (children: name, date, type, size, none).
+ui::FluentMenuItem BuildGroupMenu(const BackgroundViewOptions& options);
+ui::FluentMenuItem BuildShortcutHints();
+std::vector<ui::FluentMenuItem> BuildRecycleItemMenu(bool can_undo,
+                                                     const std::wstring& undo_label);
+std::vector<ui::FluentMenuItem> BuildRecycleBackgroundMenu(bool can_undo,
+                                                           const std::wstring& undo_label,
+                                                           bool can_empty);
+std::vector<ui::FluentMenuItem> BuildRecyclePlaceMenu(bool can_empty);
+
+// Toolbar "新建▾" dropdown (reuses the same FluentMenu component).
+std::vector<ui::FluentMenuItem> BuildNewMenu();
+
+std::vector<ui::FluentMenuItem> BuildBreadcrumbMenu(bool filesystem);
+
+// Split-button layout presets.
+std::vector<ui::FluentMenuItem> BuildSplitMenu(int current_preset);
+// can_apply_all: real folder, offer "apply view and sort to all folders".
+// wall: the icon view is a photo wall (its row is the checked one).
+std::vector<ui::FluentMenuItem> BuildViewMenu(ui::ViewMode current_mode,
+                                              bool details_panel = false,
+                                              bool can_apply_all = false,
+                                              bool wall = false);
+
+// Ctrl+K / address omnibar: verbs + index hits + recent folders at the end.
+struct OmnibarQuery {
+    enum class Kind { Mixed, Command, Search, Project };
+    Kind kind = Kind::Mixed;
+    std::wstring needle;
+    wchar_t prefix = 0;
+};
+
+OmnibarQuery ParseOmnibarQuery(const std::wstring& query, bool project_only = false);
+bool LooksLikeFilesystemPath(const std::wstring& text);
+
+// `commands` are the action registry's rows for the query
+// (actions::PaletteRows); they lead, then index hits and recent folders.
+// Command mode ("> ...") lists the commands only.
+std::vector<ui::FluentMenuItem> BuildCommandPalette(const std::wstring& query,
+                                                    std::vector<ui::FluentMenuItem> commands,
+                                                    const std::vector<std::wstring>& recent_paths,
+                                                    const std::vector<index::Hit>& hits,
+                                                    bool project_only,
+                                                    size_t total = 0,
+                                                    const std::wstring& current_path = {});
+
+// "base.ext", "base (2).ext", ... — first name not colliding under dir.
+std::wstring UniqueChildName(const std::wstring& dir, const std::wstring& base,
+                             const std::wstring& ext);
+std::wstring UniqueChildName(const std::wstring& dir, const std::wstring& base,
+                             const std::wstring& ext, const std::function<bool()>& cancelled);
+
+} // namespace pulse::app

@@ -1,0 +1,707 @@
+#pragma once
+
+#include "ui_compositor.h"
+#include "drive_capacity.h"
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <string_view>
+
+namespace pulse::ui::fluent {
+
+// Immediate-mode state. The owner keeps input and animation state; controls only draw it.
+struct ControlState {
+    bool enabled = true;
+    bool hovered = false;
+    bool pressed = false;
+    bool focused = false;
+    bool checked = false;
+    bool selected = false;
+    bool keyboard_focus = false;
+    // Negative means snap to checked; otherwise this is the eased 0..1 check transition.
+    float check_progress = -1.0f;
+};
+
+enum class HorizontalAlignment { Left, Center, Right };
+enum class ButtonKind { Standard, Primary, Danger, Transparent, Toggle, TransparentToggle };
+enum class TitleBarButtonRole { Custom, Minimize, Maximize, Restore, Close };
+enum class BadgeKind { Neutral, Accent, Success, Warning, Danger, Keycap };
+enum class SegmentPosition { Single, First, Middle, Last };
+enum class SortDirection { None, Ascending, Descending };
+enum class InfoBarKind { Informational, Success, Warning, Error, Neutral };
+enum class EasingCurve { Linear, OutQuad, OutCubic, InOutQuad, InOutSine, OutSine };
+// Small pane-layout diagrams for the split menu (not Segoe glyphs).
+enum class MenuPictogram {
+    None = 0,
+    LayoutSingle,
+    LayoutSideBySide,
+    LayoutStacked,
+    LayoutThree,
+    LayoutFour,
+    LayoutColumns,
+    LayoutCascade,
+    LayoutMainRight,
+    LayoutMainTop,
+    WindowNew,
+    WindowOverview,
+    WindowDetach,
+    WindowMerge,
+};
+
+inline constexpr wchar_t kOmnibarHintKey[] = L"Ctrl+K";
+
+struct MotionSpec {
+    float duration_ms = 0.0f;
+    EasingCurve easing = EasingCurve::Linear;
+    float delay_ms = 0.0f;
+};
+
+// QFluent motion values. The app can map these directly to DirectComposition curves.
+namespace motion {
+inline constexpr float MenuTravelDip = 8.0f;
+inline constexpr MotionSpec SwitchSlide{120.0f, EasingCurve::Linear};
+inline constexpr MotionSpec ProgressShortBar{833.0f, EasingCurve::Linear};
+inline constexpr MotionSpec ProgressLongBar{1167.0f, EasingCurve::OutQuad, 785.0f};
+} // namespace motion
+
+float EvaluateMotion(const MotionSpec& motion, float elapsed_ms) noexcept;
+
+struct ButtonSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view text;
+    std::wstring_view glyph;
+    ButtonKind kind = ButtonKind::Standard;
+    ControlState state{};
+    bool icon_only = false;
+    bool drop_down = false;
+    bool bordered = true;
+    bool skip_glyph = false;
+    // Drop-down chevron turn, 0..1 = 0..180 degrees (its menu opening).
+    float chevron_turn = 0.0f;
+    // Key that does the same (L"Enter", L"Esc"): a faint keycap after the
+    // text, centred with it. MeasureButtonWidth takes the same text.
+    std::wstring_view keycap;
+};
+
+struct TextFieldSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view text;
+    std::wstring_view placeholder;
+    std::wstring_view leading_glyph;
+    std::wstring_view trailing_glyph;
+    ControlState state{};
+    float trailing_width = 0.0f;
+    bool suppress_text = false;
+    std::wstring_view trailing_badge;   // right-side hint, e.g. L"> 命令"
+    std::wstring_view trailing_keycap;  // right-most keycap, e.g. L"Ctrl+K"
+    bool compact_leading_glyph = false;
+    // Opaque hosted EDIT/Luma overlay sits on the frame; rest fill must match it.
+    bool hosted_edit = false;
+    bool suppress_leading_glyph = false; // Reserve space for a caller-drawn vector icon.
+};
+
+struct TabSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view text;
+    std::wstring_view glyph;
+    ControlState state{};
+    bool show_close = false;
+};
+
+struct MenuItemSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view text;
+    std::wstring_view shortcut;
+    std::wstring_view badge_text;
+    std::wstring_view glyph;
+    ControlState state{};
+    bool has_submenu = false;
+    bool separator_after = false;
+    bool has_swatch = false;
+    bool checked = false;
+    bool mixed = false;
+    bool toggle = false;
+    bool secondary = false;
+    bool radio = false;
+    bool radio_group = false;      // reserve a leading selection-dot column
+    MenuPictogram pictogram = MenuPictogram::None;
+    D2D1_COLOR_F swatch_color{};
+    float glyph_scale = 1.0f;
+    bool accent_glyph = false;     // glyph in the accent colour (assistant hand-off)
+    bool shortcut_inline = false;
+    float inline_label_width = 0.0f;
+    // Explorer-style app icon (premultiplied, same device as the painter's
+    // context); wins over glyph/pictogram and is drawn 16 DIP like Explorer's.
+    ID2D1Bitmap* icon_bitmap = nullptr;
+    // Command palette: a section caption row, and the label characters the
+    // query matched (semibold; plain when the label must ellipsize).
+    bool heading = false;
+    uint16_t match_start = 0;
+    uint16_t match_length = 0;
+};
+
+struct ScrollbarSpec {
+    D2D1_RECT_F viewport{};
+    float offset = 0.0f;
+    float viewport_extent = 0.0f;
+    float content_extent = 0.0f;
+    float expand_progress = 0.0f;
+    float opacity = 1.0f;  // fades the whole bar; high contrast always draws it opaque
+    bool enabled = true;
+    bool horizontal = false;  // along the viewport's bottom edge (offset runs left to right)
+};
+
+D2D1_RECT_F ScrollbarThumbRect(const ScrollbarSpec& spec, float scale,
+                              bool high_contrast = false) noexcept;
+
+// One scrollbar for every scrolling surface: ScrollbarSpec draws it
+// (Painter::DrawScrollbar), the functions below move it and ScrollbarFade
+// times it, so the file list, settings, the sidebar, menus and the assistant
+// panel look and drag alike.
+//
+// True when a press at (x, y) lands on the bar: in its viewport while it scrolls.
+bool ScrollbarHitTest(const ScrollbarSpec& spec, float x, float y) noexcept;
+// Where along the thumb a press holds it: on the thumb, where it was pressed;
+// on the track, its middle (the thumb jumps under the pointer).
+float ScrollbarGrabOffset(float thumb_start, float thumb_length, float pointer) noexcept;
+// The offset for the pointer while dragging, along one axis; `grab` is from
+// ScrollbarGrabOffset at the press.
+float ScrollbarDragOffset(float track_start, float track_length, float thumb_length,
+                          float max_offset, float pointer, float grab) noexcept;
+
+// Visibility and width over time: a thin thumb shows while its view scrolls
+// (or always, with KeepVisible) and fades out a moment later; the pointer on
+// the bar or a drag keeps it and expands it to the full thumb with its track.
+// Time based, so a slow UI tick only coarsens it.
+class ScrollbarFade {
+public:
+    static constexpr uint64_t kHoldMs = 1000;    // visible after the last scroll or hover
+    static constexpr uint64_t kFadeInMs = 100;
+    static constexpr uint64_t kFadeOutMs = 400;
+    static constexpr uint64_t kExpandMs = 120;
+
+    // The view scrolled.
+    void Reveal(uint64_t now) noexcept;
+    // Pointer on the bar, or the bar being dragged.
+    void SetHot(bool hot, uint64_t now) noexcept;
+    // Thin at rest instead of hidden (short lists in menus and panels).
+    void KeepVisible(bool keep) noexcept { keep_visible_ = keep; }
+    // Advances to `now`; true when opacity or expansion changed.
+    bool Tick(uint64_t now) noexcept;
+    // True while a frame-rate tick matters: a fade or expansion is running or
+    // about to start.
+    bool Moving(uint64_t now) const noexcept;
+
+    float Opacity() const noexcept { return opacity_; }
+    float Expand() const noexcept { return expand_; }
+
+private:
+    float TargetOpacity(uint64_t now) const noexcept;
+    float TargetExpand() const noexcept { return hot_ ? 1.0f : 0.0f; }
+
+    float opacity_ = 0.0f;
+    float expand_ = 0.0f;
+    bool hot_ = false;
+    bool keep_visible_ = false;
+    uint64_t visible_until_ = 0;
+    uint64_t last_tick_ = 0;
+};
+
+// A stepped slider (思考强度, after Codex): a pill track with a dot at each
+// stop, filled in the accent up to a round knob. The owner keeps the position
+// and moves it (drag, click, keys, the snap's slight overshoot); the
+// functions below map stops to pixels, so drawing and hit testing agree.
+struct StepSliderSpec {
+    D2D1_RECT_F bounds{};   // the slider's row, StepSliderHeight tall
+    int stops = 2;
+    float position = 0.0f;  // in stops, 0..stops-1 (fractional while it moves)
+    ControlState state{};   // hovered, pressed (dragging), keyboard_focus, enabled
+};
+
+// The row height in pixels: the 30 DIP knob and room for its shadow.
+float StepSliderHeight(float scale) noexcept;
+// The knob's centre for `position` (in stops); the end stops sit a knob
+// radius in from the ends.
+float StepSliderStopX(const D2D1_RECT_F& bounds, int stops, float position, float scale) noexcept;
+// The position (in stops, fractional, clamped) under the pointer at `x`.
+float StepSliderPositionAt(const D2D1_RECT_F& bounds, int stops, float x, float scale) noexcept;
+
+struct ListRowSpec {
+    D2D1_RECT_F bounds{};
+    ControlState state{};
+    bool cut = false;
+    bool drop_target = false;
+};
+
+struct SidebarItemSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view text;
+    std::wstring_view detail;
+    std::wstring_view glyph;
+    std::wstring_view badge_text;
+    D2D1_COLOR_F badge_color{};
+    bool custom_badge_color = false;
+    ControlState state{};
+    int badge_count = 0;
+    bool show_count = false;
+    bool drop_target = false;
+    bool tag_dot = false;
+    bool status_dot = false;
+    bool suppress_text = false;
+    bool skip_glyph = false;
+    float trailing_reserve = 0.0f;
+    bool alias_mark = false;   // the label is a 别名: the mark follows it
+    // Count roll (motion v2 "dropbin"): below 1 the count / detail text is
+    // still rolling in from count_prev - up when it grew, down when it shrank.
+    float count_roll = 1.0f;
+    std::wstring_view count_prev;
+    bool count_roll_down = false;
+    D2D1_COLOR_F icon_color{};
+    D2D1_COLOR_F tag_color{};
+    D2D1_COLOR_F status_color{};
+};
+
+struct TrayCardSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view summary;
+    std::wstring_view detail;
+    int item_count = 0;
+    bool move_intent = false;
+    ControlState state{};
+};
+
+struct ProgressSpec {
+    D2D1_RECT_F bounds{};
+    float value = 0.0f;
+    bool indeterminate = false;
+    bool paused = false;
+    bool error = false;
+    float animation_progress = 0.0f;
+};
+
+struct BreadcrumbSegmentSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view text;
+    std::wstring_view glyph;
+    ControlState state{};
+    bool current = false;
+    bool has_separator = true;
+    bool has_menu = false;
+};
+
+struct CommandSearchBoxSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view placeholder;
+    std::wstring_view keycap;
+    ControlState state{};
+    std::wstring_view text;
+    bool suppress_text = false;
+    bool hosted_edit = false;
+};
+
+struct SplitButtonSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view text;
+    std::wstring_view glyph;
+    ControlState primary_state{};
+    ControlState menu_state{};
+};
+
+struct SplitterSpec {
+    D2D1_RECT_F bounds{};
+    ControlState state{};
+    bool vertical = true; // vertical bar between left/right panes
+};
+
+struct SegmentedItemSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view text;
+    std::wstring_view glyph;
+    ControlState state{};
+    SegmentPosition position = SegmentPosition::Single;
+    bool shared_track = false;
+    bool suppress_plate = false;
+};
+
+struct BadgeSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view text;
+    BadgeKind kind = BadgeKind::Neutral;
+    D2D1_COLOR_F custom_background{};
+    D2D1_COLOR_F custom_foreground{};
+    bool use_custom_colors = false;
+    bool dot = false;
+};
+
+// Compact filled tag used for user-assigned labels (starred/quick-access
+// labels and file-row labels). This is intentionally separate from BadgeSpec:
+// badges also cover status pills and keyboard hints with different semantics.
+struct TagSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view text;
+    D2D1_COLOR_F color{};
+    bool bordered = true;
+};
+
+struct SidebarSectionHeaderSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view text;
+    // Optional leading icon (Segoe Fluent Icons codepoint). Empty = text only.
+    std::wstring_view glyph;
+    // The caller already painted the embedded vector icon for `glyph`; the text
+    // still leaves room for it.
+    bool skip_glyph = false;
+    ControlState state{};
+    bool expanded = true;
+};
+
+struct DriveSidebarItemSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view name;
+    std::wstring_view detail;
+    std::wstring_view glyph;
+    float capacity = 0.0f;
+    // Bytes left, for the "under 1 GB" red (kCapacityUnknownFree: by percent only).
+    std::uint64_t free_bytes = kCapacityUnknownFree;
+    // Capacity in bytes. Known: the name with its percent, the bar, then
+    // "75.0 GB 可用 · 共 476.6 GB" (as on This PC tiles). 0: `detail` beside
+    // the name instead.
+    std::uint64_t total_bytes = 0;
+    ControlState state{};
+    bool drop_target = false;
+    bool skip_glyph = false;
+    D2D1_COLOR_F icon_color{};
+    D2D1_COLOR_F bar_color{};
+};
+
+struct PaneHeaderSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view title;
+    std::wstring_view summary;
+    std::wstring_view filter_text;
+    ControlState filter_state{};
+    ControlState sort_state{};
+};
+
+struct ColumnHeaderSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view text;
+    ControlState state{};
+    SortDirection sort = SortDirection::None;
+    HorizontalAlignment alignment = HorizontalAlignment::Left;
+};
+
+struct FileRowContentSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view name;
+    std::wstring_view modified;
+    std::wstring_view type;
+    std::wstring_view size;
+    std::wstring_view glyph;
+    std::wstring_view status;
+    ControlState state{};
+    BadgeKind status_kind = BadgeKind::Neutral;
+    std::array<D2D1_COLOR_F, 3> tag_colors{};
+    size_t tag_count = 0;
+    bool cut = false;
+    bool drop_target = false;
+};
+
+struct StagingTrayPanelSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view title;
+    std::wstring_view helper;
+    std::wstring_view count_label;
+    std::wstring_view action_text;
+    int item_count = 0;
+    ControlState state{};
+    bool action_hovered = false; // 释放 button under the cursor
+    bool expanded = true;
+};
+
+struct StagingItemSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view name;
+    ControlState state{};
+    bool missing = false;
+};
+
+struct StatusBarSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view left_text;
+    std::wstring_view center_text;
+    std::wstring_view right_text;
+    bool ready = true;
+};
+
+struct InfoBarSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view title;
+    std::wstring_view message;
+    std::wstring_view glyph;
+    InfoBarKind kind = InfoBarKind::Informational;
+    ControlState state{};
+    bool show_close = true;
+    bool show_icon_background = true;
+    float trailing_width = 0.0f; // DIP reserved for an adjacent action.
+    float close_inset = 2.0f;
+    // Up to two tone-colored text buttons on the right of the first line
+    // (the first one is the main action). Empty views are skipped.
+    std::wstring_view actions[2];
+    int hovered_action = -1;
+    // What the bar sits on, for text rendering; alpha 0 means the theme background.
+    D2D1_COLOR_F backdrop{};
+};
+
+// Where an InfoBar puts its parts; the same numbers drive drawing and hit tests.
+struct InfoBarLayout {
+    D2D1_RECT_F glyph{};
+    D2D1_RECT_F title{};
+    D2D1_RECT_F message{};
+    D2D1_RECT_F actions[2]{};
+    D2D1_RECT_F close{};
+    bool two_line = false;     // message on its own line under the title
+};
+
+struct EmptyStateSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view glyph;
+    std::wstring_view title;
+    std::wstring_view message;
+};
+
+class Painter {
+    friend struct PainterTestPeer;
+public:
+    // A glyph at `format`'s size: its command icon when it has one, else the font.
+    void DrawGlyphWithFormat(std::wstring_view glyph, const D2D1_RECT_F& bounds,
+                             const D2D1_COLOR_F& color, IDWriteTextFormat* format);
+    explicit Painter(Compositor* compositor = nullptr) noexcept;
+
+    void SetCompositor(Compositor* compositor) noexcept;
+    void SetScale(float scale) noexcept;
+    void InvalidateTypography() noexcept;
+    float Scale() const noexcept { return scale_; }
+
+    // Call once before drawing a frame. Updating brush colors does not allocate resources.
+    bool BeginFrame(const Theme& theme, bool high_contrast = false);
+
+    void FillRoundedRect(const D2D1_RECT_F& bounds, float radius,
+                         const D2D1_COLOR_F& color);
+    void StrokeRoundedRect(const D2D1_RECT_F& bounds, float radius,
+                           const D2D1_COLOR_F& color, float width = 1.0f);
+    void DrawText(std::wstring_view text, const D2D1_RECT_F& bounds,
+                  IDWriteTextFormat* format, const D2D1_COLOR_F& color,
+                  HorizontalAlignment alignment = HorizontalAlignment::Left);
+    void DrawText(std::wstring_view text, const D2D1_RECT_F& bounds,
+                  IDWriteTextFormat* format, const D2D1_COLOR_F& color,
+                  HorizontalAlignment alignment, const D2D1_COLOR_F& background);
+    void DrawGlyph(std::wstring_view glyph, const D2D1_RECT_F& bounds,
+                   const D2D1_COLOR_F& color);
+    // 别名 mark: a soft-accent rounded tile with a
+    // tag drawn in the accent. `tile` is its 14-DIP square.
+    void DrawAliasMark(const D2D1_RECT_F& tile);
+    void DrawPaneLayoutIcon(const D2D1_RECT_F& bounds, MenuPictogram kind, const D2D1_COLOR_F& color);
+    void DrawFocusRing(const D2D1_RECT_F& bounds, float radius);
+
+    void DrawButton(const ButtonSpec& spec);
+    // Main toolbar and file picker command buttons share 20-DIP vector icons.
+    void DrawCommandButton(const ButtonSpec& spec);
+    void DrawTextFieldFrame(const D2D1_RECT_F& bounds, const ControlState& state,
+                           bool hosted_edit = false);
+    void DrawTextField(const TextFieldSpec& spec);
+    void DrawCheckBox(const D2D1_RECT_F& bounds, std::wstring_view text,
+                      const ControlState& state);
+    void DrawRadioButton(const D2D1_RECT_F& bounds, std::wstring_view text,
+                         const ControlState& state);
+    void DrawSwitch(const D2D1_RECT_F& bounds, std::wstring_view text,
+                    const ControlState& state);
+    void DrawTitleBarButton(const D2D1_RECT_F& bounds, TitleBarButtonRole role,
+                            std::wstring_view custom_glyph, const ControlState& state);
+    void DrawTab(const TabSpec& spec);
+    // plate_drawn: an acrylic plate is already under bounds; only the border is drawn.
+    void DrawMenuSurface(const D2D1_RECT_F& bounds, bool plate_drawn = false);
+    void DrawMenuItem(const MenuItemSpec& spec);
+    void DrawTooltip(const D2D1_RECT_F& bounds, std::wstring_view text);
+    void DrawListRowBackground(const ListRowSpec& spec);
+    void DrawSidebarItem(const SidebarItemSpec& spec);
+    void DrawTrayCard(const TrayCardSpec& spec);
+    void DrawProgressBar(const ProgressSpec& spec);
+    void DrawProgressRing(const ProgressSpec& spec);
+    void DrawTagDot(D2D1_POINT_2F center, float radius, const D2D1_COLOR_F& color);
+    void DrawTagDotState(D2D1_POINT_2F center, float radius, const D2D1_COLOR_F& color,
+                         bool checked, bool mixed, bool hovered = false);
+    void DrawScrollbar(const ScrollbarSpec& spec);
+    void DrawStepSlider(const StepSliderSpec& spec);
+    void DrawBreadcrumbSegment(const BreadcrumbSegmentSpec& spec);
+    void DrawCommandSearchBox(const CommandSearchBoxSpec& spec);
+    void DrawSplitButton(const SplitButtonSpec& spec);
+    void DrawSplitter(const SplitterSpec& spec);
+    void DrawSegmentedItem(const SegmentedItemSpec& spec);
+    void DrawSegmentedTrack(const D2D1_RECT_F& bounds);
+    void DrawBadge(const BadgeSpec& spec);
+    float MeasureBadgeWidth(std::wstring_view text) const;
+    float MeasureButtonWidth(std::wstring_view text,
+                             std::wstring_view glyph = {},
+                             bool drop_down = false,
+                             std::wstring_view keycap = {}) const;
+    float MeasureButtonHeight() const;
+    // Wrapped setting labels use the same 14px regular body style as other rows.
+    float MeasureWrappedBodyHeight(std::wstring_view text, float width) const;
+    void DrawWrappedBody(std::wstring_view text, D2D1_POINT_2F origin, float width,
+                         const D2D1_COLOR_F& color);
+    // Word-wrapped caption text (release notes): height for a width, and drawing.
+    float MeasureWrappedCaptionHeight(std::wstring_view text, float width) const;
+    void DrawWrappedCaption(std::wstring_view text, D2D1_POINT_2F origin, float width,
+                            const D2D1_COLOR_F& color);
+    // The same in the section header style (13px semibold): release-note headings.
+    float MeasureWrappedSectionHeight(std::wstring_view text, float width) const;
+    void DrawWrappedSection(std::wstring_view text, D2D1_POINT_2F origin, float width,
+                            const D2D1_COLOR_F& color);
+    bool HighContrast() const noexcept { return high_contrast_; }
+    D2D1_RECT_F FitButtonBounds(D2D1_RECT_F bounds, std::wstring_view text,
+                                std::wstring_view glyph = {},
+                                bool drop_down = false) const;
+    void DrawTag(const TagSpec& spec);
+    float MeasureTagWidth(std::wstring_view text) const;
+    float OmnibarHintReservePx() const;
+    D2D1_RECT_F DrawOmnibarHints(const D2D1_RECT_F& field, bool skip_search_glyph = false);
+    D2D1_RECT_F ButtonGlyphRect(const D2D1_RECT_F& bounds, bool icon_only) const;
+    void DrawSidebarSectionHeader(const SidebarSectionHeaderSpec& spec);
+    // Leading-icon slot of a section header (valid when its glyph is set).
+    D2D1_RECT_F SidebarSectionHeaderIconRect(const D2D1_RECT_F& bounds) const;
+    // Icon + title of a section header: the part that navigates on a navigable
+    // section (#80). Stops short of the add button and the chevron.
+    D2D1_RECT_F SidebarSectionHeaderTitleRect(const D2D1_RECT_F& bounds,
+                                              std::wstring_view text, bool has_icon) const;
+    D2D1_RECT_F SidebarItemIconRect(const D2D1_RECT_F& bounds, bool status_dot) const;
+    D2D1_RECT_F DriveSidebarItemIconRect(const D2D1_RECT_F& bounds) const;
+    void DrawDriveSidebarItem(const DriveSidebarItemSpec& spec);
+    // "75.0 GB 可用 · 共 476.6 GB": the free size semibold in the text colour,
+    // "仅剩 X" in red once the drive is critical.
+    void DrawCapacitySpaceLine(const DriveSpaceText& space, CapacityLevel level,
+                               const D2D1_RECT_F& bounds, bool enabled = true);
+    // Drive usage track (sidebar drives, This PC tiles, phone storage, hover
+    // preview): a soft gradient in `value_color`, amber from 80% used and red
+    // from 95% (CapacityLevelFor). `reveal` 0..1 grows the fill in.
+    void DrawCapacityBar(const D2D1_RECT_F& track, float capacity, D2D1_COLOR_F value_color,
+                         float reveal = 1.0f, std::uint64_t free_bytes = kCapacityUnknownFree);
+    // The colour of a drive's numbers next to its bar (percent, "仅剩 X").
+    D2D1_COLOR_F CapacityInk(CapacityLevel level) const;
+    void DrawPaneHeader(const PaneHeaderSpec& spec);
+    void DrawColumnHeader(const ColumnHeaderSpec& spec);
+    void DrawFileRowContent(const FileRowContentSpec& spec);
+    void DrawStagingTrayPanel(const StagingTrayPanelSpec& spec);
+    void DrawStagingItem(const StagingItemSpec& spec);
+    void DrawStatusBar(const StatusBarSpec& spec);
+    void DrawInfoBar(const InfoBarSpec& spec);
+    InfoBarLayout LayoutInfoBar(const InfoBarSpec& spec) const;
+    // The round status glyph of an InfoBar (check, !, x, i) filling `rect`;
+    // `backdrop` alpha 0 means the theme background.
+    void DrawStatusGlyph(InfoBarKind kind, const D2D1_RECT_F& rect, D2D1_COLOR_F backdrop = {});
+    // The solid color of that glyph (for an edge or a line in the same tone).
+    D2D1_COLOR_F StatusToneColor(InfoBarKind kind) const;
+    // Height of a one-line strip, or of two lines when the message does not
+    // fit beside the title and the actions at this width (pixels).
+    float InfoBarStripHeight(const InfoBarSpec& spec, float width) const;
+    void DrawEmptyState(const EmptyStateSpec& spec);
+
+    D2D1_RECT_F ScrollbarThumbRect(const ScrollbarSpec& spec) const noexcept;
+    static float ListRowContentOpacity(const ListRowSpec& spec) noexcept;
+    static bool Contains(const D2D1_RECT_F& bounds, float x, float y) noexcept;
+
+private:
+    enum class BrushId : size_t {
+        Background,
+        Text,
+        TextSecondary,
+        TextDisabled,
+        Hover,
+        Pressed,
+        Selected,
+        Input,
+        InputHover,
+        StrokeCard,
+        Divider,
+        InputBottom,
+        Flyout,
+        Accent,
+        AccentHover,
+        AccentPressed,
+        AccentText,
+        AccentTextPressed,
+        Danger,
+        DangerHover,
+        CloseText,
+        Scrollbar,
+        TabActive,
+        Count
+    };
+
+    ID2D1SolidColorBrush* Brush(BrushId id) const noexcept;
+    ID2D1SolidColorBrush* ScratchBrush(const D2D1_COLOR_F& color);
+    void UpdateBrush(BrushId id, const D2D1_COLOR_F& color);
+    void Fill(const D2D1_RECT_F& bounds, BrushId brush);
+    void FillRounded(const D2D1_RECT_F& bounds, float radius, BrushId brush);
+    void StrokeRounded(const D2D1_RECT_F& bounds, float radius, BrushId brush,
+                       float width = 1.0f);
+    void DrawTextWithBrush(std::wstring_view text, const D2D1_RECT_F& bounds,
+                           IDWriteTextFormat* format, BrushId brush,
+                           HorizontalAlignment alignment = HorizontalAlignment::Left);
+    void DrawGlyphWithBrush(std::wstring_view glyph, const D2D1_RECT_F& bounds,
+                            BrushId brush);
+    void DrawCheckMark(const D2D1_RECT_F& bounds, const D2D1_COLOR_F& color);
+
+    void DrawArc(D2D1_POINT_2F center, float radius, float start_degrees,
+                 float span_degrees, float stroke_width, const D2D1_COLOR_F& color);
+    // A 1px rounded border whose last few pixels on one side shade from
+    // `border` to `edge` (WinUI's elevation border).
+    void StrokeElevationRect(const D2D1_RECT_F& bounds, float radius,
+                             const D2D1_COLOR_F& border, const D2D1_COLOR_F& edge,
+                             bool edge_on_top);
+    // A two-stop linear gradient brush from a small cache keyed by the colour
+    // pair; the caller sets its start and end points. Null if creation failed.
+    ID2D1LinearGradientBrush* CachedGradient(const D2D1_COLOR_F& from, const D2D1_COLOR_F& to);
+    void EnsureTextFormats();
+    void EnsureStrokeStyle();
+    IDWriteTextFormat* BodyFormat() const noexcept;
+    IDWriteTextFormat* CaptionFormat() const noexcept;
+    IDWriteTextFormat* NavFormat() const noexcept;     // sidebar rows: 13px
+    IDWriteTextFormat* SectionFormat() const noexcept; // sidebar group headers: 13px semibold
+    IDWriteTextFormat* SmallIconFormat() const noexcept;
+    IDWriteTextFormat* MenuChevronFormat() const noexcept; // submenu ">" : 12px
+    IDWriteTextFormat* MenuIconFormat() const noexcept;    // menu row glyphs: 14px
+    IDWriteTextFormat* MicroIconFormat() const noexcept;
+    float Px(float dips) const noexcept;
+
+    Compositor* compositor_ = nullptr;
+    ID2D1DeviceContext* dc_ = nullptr;
+    const Theme* theme_ = nullptr;
+    float scale_ = 1.0f;
+    bool high_contrast_ = false;
+    bool dark_ = false;
+    float format_scale_ = 0.0f;
+    std::uint64_t format_generation_ = 0;   // typography::Generation() of the formats
+    std::array<ComPtr<ID2D1SolidColorBrush>, static_cast<size_t>(BrushId::Count)> brushes_{};
+    ComPtr<ID2D1SolidColorBrush> scratch_brush_;
+    struct GradientEntry {
+        D2D1_COLOR_F from{};
+        D2D1_COLOR_F to{};
+        ComPtr<ID2D1LinearGradientBrush> brush;
+    };
+    std::array<GradientEntry, 12> gradient_cache_{};  // button edges, capacity fills, by colour pair
+    std::size_t gradient_next_ = 0;
+    ComPtr<ID2D1StrokeStyle> round_stroke_;
+    ComPtr<IDWriteTextFormat> body_format_;
+    ComPtr<IDWriteTextFormat> nav_format_;
+    ComPtr<IDWriteTextFormat> section_format_;
+    ComPtr<IDWriteTextFormat> caption_format_;
+    ComPtr<IDWriteTextFormat> small_icon_format_;
+    ComPtr<IDWriteTextFormat> menu_icon_format_;
+    ComPtr<IDWriteTextFormat> micro_icon_format_;
+    ComPtr<IDWriteInlineObject> ellipsis_sign_;
+    ComPtr<IDWriteInlineObject> nav_ellipsis_sign_;  // menu labels
+};
+
+} // namespace pulse::ui::fluent

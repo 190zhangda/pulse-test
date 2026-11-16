@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="240" viewBox="0 0 320 240" fill="none">
+  <title>No selection</title>
+  <desc>A standing document and a pointer in the Pulse empty-state style.</desc>
+  <defs>
+    <radialGradient id="ground" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(160 207) scale(92 10)">
+      <stop stop-color="#000000" stop-opacity="0.2"/><stop offset="1" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="paper" x1="0" y1="44" x2="0" y2="204" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/><stop offset="1" stop-color="#EDF1F5"/>
+    </linearGradient>
+    <linearGradient id="paperRear" x1="0" y1="58" x2="0" y2="186" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#EEF2F6"/><stop offset="1" stop-color="#D5DCE6"/>
+    </linearGradient>
+    <linearGradient id="sky" x1="0" y1="86" x2="0" y2="126" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8CC8EE"/><stop offset="1" stop-color="#D7EEFA"/>
+    </linearGradient>
+  </defs>
+  <circle cx="160" cy="120" r="88" fill="#8A96A8" fill-opacity="0.09"/>
+  <circle cx="160" cy="120" r="76" stroke="#8A96A8" stroke-opacity="0.10" stroke-width="2"/>
+  <path d="M84 57L85.96 62.04L91 64L85.96 65.96L84 71L82.04 65.96L77 64L82.04 62.04Z" fill="#A7B1C2" fill-opacity="0.7"/><path d="M252 50.5L253.54 54.46L257.5 56L253.54 57.54L252 61.5L250.46 57.54L246.5 56L250.46 54.46Z" fill="#A7B1C2" fill-opacity="0.7"/>
+  <circle cx="246" cy="98" r="2.5" fill="#A7B1C2" fill-opacity="0.6"/>
+  <ellipse cx="160" cy="207" rx="92" ry="10" fill="url(#ground)"/>
+  <g transform="rotate(-9 128 186)">
+    <rect x="80" y="60" width="100" height="126" rx="10" fill="#1E2A3C" fill-opacity="0.10" transform="translate(0 3)"/>
+    <rect x="80" y="60" width="100" height="126" rx="10" fill="url(#paperRear)"/>
+    <rect x="80.5" y="60.5" width="99" height="125" rx="9.5" stroke="#30405A" stroke-opacity="0.12"/>
+  </g>
+  <path d="M116 44H182L212 74V192C212 198.6 206.6 204 200 204H116C109.4 204 104 198.6 104 192V56C104 49.4 109.4 44 116 44Z" fill="#1E2A3C" fill-opacity="0.12" transform="translate(0 3)"/>
+  <path d="M116 44H182L212 74V192C212 198.6 206.6 204 200 204H116C109.4 204 104 198.6 104 192V56C104 49.4 109.4 44 116 44Z" fill="url(#paper)"/>
+  <path d="M116 44H182L212 74V192C212 198.6 206.6 204 200 204H116C109.4 204 104 198.6 104 192V56C104 49.4 109.4 44 116 44Z" stroke="#30405A" stroke-opacity="0.14"/>
+  <path d="M182 44V64C182 69.5 186.5 74 192 74H212Z" fill="#DCE2EA"/>
+  <path d="M182 44V64C182 69.5 186.5 74 192 74H212" stroke="#30405A" stroke-opacity="0.14" stroke-linejoin="round"/>
+  <rect x="118" y="86" width="66" height="42" rx="5" fill="url(#sky)"/>
+  <path d="M118 120L134 106L145 115L160 100L184 120V123C184 125.8 181.8 128 179 128H123C120.2 128 118 125.8 118 123Z" fill="#5FA779"/>
+  <circle cx="171" cy="97" r="5" fill="#FFF3C4"/>
+  <path d="M120 145H190M120 161H180M120 177H158" stroke="#5E6E87" stroke-opacity="0.22" stroke-width="7" stroke-linecap="round"/>
+  <g transform="translate(208 140)">
+    <path d="M0 0V33L8.5 25.5L14.5 39L21.5 36L15.5 22.5H27Z" fill="#000000" fill-opacity="0.16" transform="translate(1.5 2.5)"/>
+    <path d="M0 0V33L8.5 25.5L14.5 39L21.5 36L15.5 22.5H27Z" fill="#FFFFFF" stroke="#30405A" stroke-width="2.2" stroke-linejoin="round"/>
+  </g>
+</svg>

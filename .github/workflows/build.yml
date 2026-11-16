@@ -1,0 +1,89 @@
+name: build-pulse
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Configure
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake -S . -B build -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ^
+            -DPULSE_WITH_SELFTEST=OFF ^
+            -DPULSE_WITH_TEST_HOOKS=OFF ^
+            -DPULSE_WITH_LUMATEXT=ON ^
+            -DPULSE_WIN81_CANDIDATE=OFF ^
+            -DPULSE_RELEASE_SYMBOLS=OFF ^
+            -DPULSE_WITH_IPO=OFF ^
+            -DPULSE_UPDATE_MANIFEST_URL=https://example.invalid/pulse-custom/update-manifest.json ^
+            -DPULSE_UPDATE_PUBLIC_KEY_HEX=047ab7e12639110225de874db1f93639a3bb1d7612d9959aa6ea342303a1714a2e669cd8428cdf87b72c7c32d2d33e892347f38475ed1fbaf1a3aa095b22d2b521
+
+      - name: Build
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake --build build --target pulse --config Release
+
+      - name: Release payload checks
+        shell: pwsh
+        run: |
+          powershell -NoProfile -File scripts/check_release_payload.ps1 -BuildDir build
+          powershell -NoProfile -File scripts/stage_installer_runtime.ps1 -BuildDir build -RequireStaticRuntime
+
+      - name: Pack portable zip
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%V in ("version.txt") do set VERSION=%%V
+          python tools\pack_installer\pack_portable.py --root . --build build --version %VERSION% --out dist\Pulse-%VERSION%-portable-win-x64 --zip dist\Pulse-%VERSION%-portable-win-x64.zip
+
+      - name: Pack installer
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
+          call scripts\pack_setup.bat build
+
+      - name: Sign update manifest
+        env:
+          PULSE_PRIVATE_KEY: ${{ secrets.PULSE_UPDATE_PRIVATE_KEY }}
+        if: env.PULSE_PRIVATE_KEY != ''
+        shell: pwsh
+        run: |
+          $key = Join-Path $env:RUNNER_TEMP 'update-private-key.pem'
+          [IO.File]::WriteAllText($key, $env:PULSE_PRIVATE_KEY)
+          pwsh -File scripts/create_update_manifest.ps1 `
+            -Installer (Get-ChildItem dist -Filter 'PulseSetup*.exe' | Select-Object -First 1 -ExpandProperty FullName) `
+            -DownloadPage https://example.invalid/pulse-custom/ `
+            -PrivateKey $key `
+            -Output dist/update-manifest.json
+
+      - name: Upload installer + manifest
+        uses: actions/upload-artifact@v4
+        if: env.PULSE_PRIVATE_KEY != ''
+        with:
+          name: pulse-installer
+          path: |
+            dist/PulseSetup*.exe
+            dist/update-manifest.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload portable zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: pulse-portable
+          path: dist/Pulse-*-portable-win-x64.zip
+          if-no-files-found: error
+          retention-days: 30

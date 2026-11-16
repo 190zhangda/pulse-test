@@ -1,0 +1,36 @@
+// tab_shape.h — Chromium-style tab silhouette (convex top, inverse bottom).
+#pragma once
+#include "ui_compositor.h"
+
+namespace pulse::ui {
+
+struct ChromeTabShape {
+    float top_radius = 8.0f;
+    float bottom_radius = 8.0f;
+    bool connect_bottom = false;
+};
+
+// `bounds` is the content box (icon + title). Inverse shoulders extend
+// `bottom_radius` past left/right along the bottom edge.
+void FillChromeTab(ID2D1DeviceContext* dc, ID2D1Brush* brush,
+                   const D2D1_RECT_F& bounds, const ChromeTabShape& shape);
+
+// A hairline along the tab's silhouette. A connected tab's outline is open at
+// the bottom, so it runs from shoulder to shoulder into the sheet below.
+void StrokeChromeTabEdge(ID2D1DeviceContext* dc, ID2D1Brush* brush,
+                         const D2D1_RECT_F& bounds, const ChromeTabShape& shape, float width);
+
+// Straight accent strip whose ends are clipped by the tab's rounded path.
+// bottom=true anchors the strip to the tab's bottom edge (tab-group style).
+void FillChromeTabAccent(ID2D1DeviceContext* dc, ID2D1Brush* brush,
+                         const D2D1_RECT_F& bounds, const ChromeTabShape& shape,
+                         float thickness, bool bottom = false);
+
+enum class AccentEdge { Top, Left };
+
+// Straight strip clipped to a rounded rectangle (file selection, list rows).
+void FillRoundedAccent(ID2D1DeviceContext* dc, ID2D1Brush* brush,
+                       const D2D1_RECT_F& bounds, float radius,
+                       float thickness, AccentEdge edge);
+
+} // namespace pulse::ui

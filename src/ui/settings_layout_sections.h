@@ -1,0 +1,1341 @@
+// Included inside ui_renderer_internal.h's anonymous namespace.
+// Default file manager card helpers shared by layout, drawing and tests.
+struct IntegrationBadgeInfo { std::wstring text; fluent::BadgeKind kind = fluent::BadgeKind::Neutral; };
+// Desired integration choices are retained independently of the master switch.
+inline bool IntegrationHasProblem(const WindowViewModel& vm) {
+    return vm.settings_integration_state==2 || vm.settings_integration_state==3;
+}
+inline IntegrationBadgeInfo MakeIntegrationBadge(const WindowViewModel& vm) {
+    using I=l10n::StringId;
+    if(vm.settings_integration_state==3) return {l10n::Get(I::IntegrationFailed),fluent::BadgeKind::Danger};
+    if(vm.settings_integration_state==2) return {l10n::Get(I::IntegrationPartial),fluent::BadgeKind::Warning};
+    if(!vm.settings_integration_enabled) return {l10n::Get(I::IntegrationOff),fluent::BadgeKind::Neutral};
+    return {l10n::Get(I::IntegrationOn),fluent::BadgeKind::Success};
+}
+inline std::wstring IntegrationProblemTitle(const WindowViewModel& vm) {
+    using I=l10n::StringId;
+    if(vm.settings_integration_state==3) return l10n::Get(I::IntegrationFailTitle);
+    return l10n::Get(vm.settings_integration_other_exe.empty() ? I::IntegrationDriftTitle : I::IntegrationOtherTitle);
+}
+inline std::wstring IntegrationProblemMessage(const WindowViewModel& vm) {
+    if(vm.settings_integration_state==3)
+        return vm.settings_integration_summary.empty() ? l10n::Get(l10n::StringId::IntegrationFailed) : vm.settings_integration_summary;
+    if(vm.settings_integration_state!=2) return {};
+    return vm.settings_integration_other_exe.empty() ? l10n::Get(l10n::StringId::IntegrationDriftDesc)
+                                                     : vm.settings_integration_other_exe;
+}
+inline l10n::StringId IntegrationRetryLabel(const WindowViewModel& vm) {
+    using I=l10n::StringId;
+    if(vm.settings_integration_state==3) return I::IntegrationRetry;
+    return vm.settings_integration_other_exe.empty() ? I::IntegrationReapply : I::IntegrationUseThis;
+}
+// The footer: one plain sentence about what happens now.
+inline std::wstring IntegrationGuidance(const WindowViewModel& vm) {
+    using I=l10n::StringId;
+    if(!vm.settings_integration_enabled) return l10n::Get(I::IntegrationInactiveHint);
+    if(vm.settings_integration_just_enabled) return l10n::Get(I::IntegrationJustOn);
+    // Taking over works only while Pulse runs, and closing the window ends
+    // Pulse unless it keeps running (AppPrefs::KeepsRunningInBackground).
+    // The compatibility fallback requires Pulse to remain running.
+    if(vm.settings_integration_folders_compat && !vm.settings_keep_running) return l10n::Get(I::IntegrationHintKeepCompat);
+    if(vm.settings_integration_folders_compat && !vm.settings_launch_on_startup) return l10n::Get(I::IntegrationHintLaunchCompat);
+    if(vm.settings_integration_experimental && !vm.settings_keep_running) return l10n::Get(I::IntegrationHintKeep);
+    if(vm.settings_integration_experimental && !vm.settings_launch_on_startup) return l10n::Get(I::IntegrationHintLaunch);
+    return l10n::Get(I::IntegrationOnFoot);
+}
+inline std::wstring IntegrationHint(const WindowViewModel& vm) {
+    return IntegrationGuidance(vm);
+}
+inline bool IntegrationShowsTry(const WindowViewModel& vm) {
+    return vm.settings_integration_enabled && !IntegrationHasProblem(vm);
+}
+inline constexpr l10n::StringId kIntegrationCover[]={l10n::StringId::IntegrationFolders,
+    l10n::StringId::ThisPc,l10n::StringId::SettingsWinE};
+inline constexpr int IntegrationChoiceCount(int row) { return row == 0 ? 2 : row == 2 ? 4 : 3; }
+inline bool IntegrationCoverActive(const WindowViewModel& vm,int i) {
+    return vm.settings_integration_enabled && (i==0 ? vm.settings_integration_folders_active
+        : i==1 ? vm.settings_integration_this_pc_active : vm.settings_integration_win_e_active);
+}
+
+float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float scale,
+                            float y, const fluent::Painter* painter) {
+    using I = l10n::StringId;
+    const float left = l.content.left + 20*scale, right = l.content.right - 20*scale;
+    const bool narrow = right - left < 560*scale;
+    const float seg_h = narrow ? 98.0f : 64.0f;
+    const float child_inset = 28.0f*scale;
+    // Rows stack inside the current group card; a dependent (child) row is inset
+    // and sits on a tinted band, and dividers separate neighbours.
+    int group_index = -1;
+    float group_top = 0.0f;
+    bool group_has_row = false, previous_child = false;
+    float band_top = -1.0f;
+    auto close_band = [&]() {
+        if (band_top >= 0.0f) l.child_bands.push_back(D2D1::RectF(left, band_top, right, y));
+        band_top = -1.0f;
+    };
+    auto end_group = [&]() {
+        close_band();
+        if (group_index >= 0 && group_has_row) l.group[group_index] = D2D1::RectF(left, group_top, right, y);
+        group_has_row = false;
+    };
+    auto section = [&](I title) {
+        end_group();
+        if (l.section_count >= 8) return;
+        y += (l.section_count == 0 ? 22.0f : 26.0f)*scale;
+        group_index = l.section_count++;
+        l.section_title[group_index] = title;
+        l.section[group_index] = D2D1::RectF(left, y, right, y + 30*scale);
+        y += 32*scale;
+        group_top = y;
+    };
+    auto row = [&](float h, bool child = false) {
+        if (group_has_row) {
+            if (child && previous_child) l.dividers.push_back(D2D1::RectF(left + child_inset + 16*scale, y, right - 16*scale, y));
+            else if (!child) { close_band(); l.dividers.push_back(D2D1::RectF(left + 16*scale, y, right - 16*scale, y)); }
+        }
+        if (child && band_top < 0.0f) band_top = y;
+        group_has_row = true; previous_child = child;
+        auto r = D2D1::RectF(child ? left + child_inset : left, y, right, y + h*scale);
+        y = r.bottom;
+        return r;
+    };
+    auto choice = [&](D2D1_RECT_F r, float width) {
+        return D2D1::RectF(narrow ? r.left+16*scale : r.right-(width+16)*scale,
+            r.bottom-44*scale, r.right-16*scale, r.bottom-12*scale);
+    };
+    auto segments = [&](D2D1_RECT_F r, D2D1_RECT_F* output, int count, float width) {
+        auto c=choice(r,width); const float w=(c.right-c.left)/count;
+        for(int i=0;i<count;++i) output[i]=D2D1::RectF(c.left+i*w,c.top,c.left+(i+1)*w,c.bottom);
+    };
+    auto fitted_segments = [&](D2D1_RECT_F& r, D2D1_RECT_F* output, std::initializer_list<I> labels) {
+        std::vector<float> widths;
+        float total=0;
+        for(const auto id:labels) {
+            const float measured=painter ? painter->MeasureButtonWidth(l10n::Get(id))+12*scale : (l10n::Get(id).size()*13.0f+28)*scale;
+            const float width=(std::max)(56*scale,measured);
+            widths.push_back(width);total+=width;
+        }
+        const float available=r.right-r.left-32*scale;
+        const float shrink=(std::min)(1.0f,available/total);
+        const bool stacked=narrow || available-total<300*scale;
+        if(stacked && r.bottom-r.top<100*scale) {r.bottom+=44*scale;y+=44*scale;}
+        float x=stacked ? r.left+16*scale : r.right-16*scale-total*shrink;
+        for(size_t i=0;i<widths.size();++i) {
+            const float width=widths[i]*shrink;
+            output[i]=D2D1::RectF(x,r.bottom-44*scale,x+width,r.bottom-12*scale);x+=width;
+        }
+    };
+    auto button_w = [&](I id, float fallback) {
+        return painter ? painter->MeasureButtonWidth(l10n::Get(id)) : fallback*scale;
+    };
+    const int page = vm.settings_page;
+    if (page == 0) {
+        section(I::SettingsSecThemeColor);
+        l.theme_row=row(narrow ? 142.0f : 112.0f);
+        const float tw=(std::min)(96*scale,(right-left-32*scale)/3);
+        const float tile_left=narrow ? left+16*scale : right-16*scale-3*tw;
+        for(int i=0;i<3;++i) l.theme_tile[i]=D2D1::RectF(tile_left+i*tw+4*scale,
+            l.theme_row.bottom-90*scale,tile_left+(i+1)*tw-4*scale,l.theme_row.bottom-12*scale);
+        l.language_card=row(seg_h); l.language_choice=choice(l.language_card,176);
+    } else if (page == 9) {
+        section(I::SettingsSecOpenSelect);
+        l.click_open_card=row(seg_h); fitted_segments(l.click_open_card,l.click_open_row,{I::ClickOpenDouble,I::ClickOpenSingle});
+        if(vm.settings_single_click) {
+            l.name_highlight_card=row(seg_h,true); fitted_segments(l.name_highlight_card,l.name_highlight_row,{I::NameHighlightHover,I::NameHighlightAlways});
+            l.hover_select_row=row(64,true);
+        }
+        l.item_checkbox_row=row(64);
+        {
+            // Its description is long: when it would not fit on one line left
+            // of the choices, the choices go under it (aligned with the text)
+            // instead of cutting it off.
+            const float text_w=right-left-54*scale-(282+16)*scale-12*scale;
+            const std::wstring desc=l10n::Get(I::SettingsBlankClickBackDesc);
+            const bool stack=!narrow && painter && text_w>0 &&
+                painter->MeasureWrappedCaptionHeight(desc,text_w)>painter->MeasureWrappedCaptionHeight(L"\x4E2D",text_w)+0.5f*scale;
+            l.blank_click_row=row(stack ? 98.0f : seg_h);
+            if(stack) {
+                const float x0=l.blank_click_row.left+54*scale,w=(std::min)(282*scale,l.blank_click_row.right-16*scale-x0)/3;
+                for(int i=0;i<3;++i) l.blank_click_choice[i]=D2D1::RectF(x0+i*w,l.blank_click_row.bottom-44*scale,x0+(i+1)*w,l.blank_click_row.bottom-12*scale);
+            } else {
+                fitted_segments(l.blank_click_row,l.blank_click_choice,{I::SettingsBlankClickOff,I::Back,I::Up});
+            }
+        }
+
+        section(I::SettingsSecVisibleItems);
+        l.hidden_files_row=row(64);
+        l.protected_files_row=row(64);
+        l.folder_sort_card=row(seg_h); fitted_segments(l.folder_sort_card,l.folder_sort_row,{I::FolderSortTop,I::FolderSortFollow,I::FolderSortMixed});
+
+        section(I::SettingsSecListLook);
+        l.density_card=row(seg_h); fitted_segments(l.density_card,l.density_row,{I::SettingsDensityCompact,I::SettingsDensityStandard,I::SettingsDensityRoomy});
+        l.list_style_row[1]=row(64);   // zebra rows
+        l.list_style_row[0]=row(64);   // smart date
+        for(int i=2;i<7;++i) l.list_style_row[i]=row(64);
+        {
+            // 缩略图缓存: title, description, then the usage bar; the button
+            // is as wide as its longest label so it does not jump.
+            l.thumb_cache_row=row(narrow ? 108.0f : 88.0f);
+            const float bw=(std::max)({button_w(I::ThumbCacheClear,96),button_w(I::ThumbCacheClearing,96),
+                button_w(I::ThumbCacheDone,96)});
+            const float mid=(l.thumb_cache_row.top+l.thumb_cache_row.bottom)/2;
+            l.thumb_cache_button=D2D1::RectF(right-16*scale-bw,mid-16*scale,right-16*scale,mid+16*scale);
+        }
+        l.alias_mark_row=row(64);
+        l.tree_sticky_row=row(64);
+
+        section(I::ListMtimeHint);
+        l.mtime_style_card=row(seg_h); fitted_segments(l.mtime_style_card,l.mtime_style_row,{I::MtimeStyleOff,I::MtimeStyleDot,I::MtimeStyleBar,I::MtimeStyleText});
+        if(vm.settings_mtime.style!=0) {
+            l.mtime_range_card=row(seg_h,true); fitted_segments(l.mtime_range_card,l.mtime_range_row,{I::MtimeRangeToday,I::MtimeRange3,I::MtimeRange7,I::MtimeRange30});
+            l.mtime_palette_card=row(seg_h,true); fitted_segments(l.mtime_palette_card,l.mtime_palette_row,{I::MtimePaletteAccent,I::MtimePaletteHeat,I::MtimePaletteTeal,I::MtimePaletteAmber,I::MtimePaletteAurora,I::MtimePaletteGraphite});
+            for(auto& mtime_row : l.mtime_toggle_row) mtime_row=row(64,true);
+        }
+
+        section(I::SettingsSecSyncStatus);
+        for(auto& sync : l.sync_row) sync=row(64);
+
+        // Page 12 (文件操作) was removed by customization; its rows merged into
+        // the end of the 文件列表 page so the settings survive without a nav row.
+        section(I::SettingsSecDelete);
+        l.confirm_delete_row=row(64);
+        // Staging tray removed by customization: no tray icon/visibility rows.
+        section(I::SettingsSecChanges);
+        l.change_tracking_row=row(64);
+        l.change_days_row=row(seg_h,true); fitted_segments(l.change_days_row,l.change_days,{I::ChangeToday,I::ChangeLast3Days,I::ChangeLast7Days});
+    } else if (page == 10) {
+        section(I::SettingsSecTabs);
+        const float tile_width=156*scale;
+        const int columns=(std::max)(1,(std::min)(3,static_cast<int>((right-left-22*scale)/(tile_width+10*scale))));
+        const int tile_rows=(3+columns-1)/columns;
+        l.tab_layout_card=row(72.0f+tile_rows*104.0f);
+        for(int i=0;i<3;++i) {
+            const float cx=left+16*scale+(i%columns)*(tile_width+10*scale);
+            const float cy=l.tab_layout_card.top+64*scale+(i/columns)*104*scale;
+            l.tab_layout_choices[i]=D2D1::RectF(cx,cy,cx+(std::min)(tile_width,right-left-32*scale),cy+94*scale);
+        }
+        const bool stack_rows=right-left<760*scale;
+        l.tab_rows_card=row(stack_rows ? 112.0f : 76.0f);
+        if(stack_rows) {
+            const auto r=l.tab_rows_card;
+            const float cell=(std::min)(192*scale,r.right-r.left-32*scale)/3;
+            for(int i=0;i<3;++i) l.tab_rows_choices[i]=D2D1::RectF(r.left+16*scale+i*cell,r.bottom-44*scale,r.left+16*scale+(i+1)*cell,r.bottom-12*scale);
+        } else segments(l.tab_rows_card,l.tab_rows_choices,3,192);
+        l.vertical_tabs_row=row(64);
+        l.pinned_names_row=row(64);
+        l.close_tab_double_click_row=row(64);
+        l.close_last_tab_row=row(64);
+
+        section(I::SettingsSecOpenLocation);
+        l.home_folder_card=row(seg_h);
+        {
+            const float rw=button_w(I::ThisPc,80), cw=button_w(I::SettingsHomeFolderPick,120);
+            l.home_folder_reset=D2D1::RectF(right-16*scale-rw,y-44*scale,right-16*scale,y-12*scale);
+            l.home_folder_choose=D2D1::RectF(l.home_folder_reset.left-8*scale-cw,y-44*scale,l.home_folder_reset.left-8*scale,y-12*scale);
+        }
+        l.startup_open_card=row(seg_h); fitted_segments(l.startup_open_card,l.startup_open_row,{I::StartupOpenLastTabs,I::OpenDefaultLocation});
+        l.new_tab_open_card=row(seg_h); fitted_segments(l.new_tab_open_card,l.new_tab_open_row,{I::NewTabOpenCurrent,I::OpenDefaultLocation});
+        section(I::SettingsSecOpenWindows);
+        l.open_pulse_icon_card=row(narrow ? 108.0f : 64.0f); fitted_segments(l.open_pulse_icon_card,l.open_pulse_icon_row,{I::ExternalOpenWindow,I::ExternalOpenTab,I::OpenWindowActivate});
+        l.new_window_shows_card=row(narrow ? 108.0f : 64.0f); fitted_segments(l.new_window_shows_card,l.new_window_shows_row,{I::OpenWindowStartup,I::OpenWindowThisPc,I::NewTabOpenCurrent});
+        l.external_open_card=row(seg_h); fitted_segments(l.external_open_card,l.external_open_row,{I::ExternalOpenSmart,I::ExternalOpenTab,I::ExternalOpenWindow});
+
+        section(I::SettingsSecArrangeWindows);
+        l.arrange_minimized_row=row(64);
+        l.arrange_gap_card=row(narrow ? 108.0f : 64.0f); fitted_segments(l.arrange_gap_card,l.arrange_gap_row,{I::ArrangeGapNone,I::ArrangeGapSix});
+    } else if (page == 11) {
+        auto wrap_height = [&](std::wstring_view value, float width) {
+            return painter ? painter->MeasureWrappedCaptionHeight(value,(std::max)(40*scale,width))/scale : 64.0f;
+        };
+        const float lead_h=wrap_height(l10n::Get(I::StartupIntegrationLead),right-left);
+        l.startup_lead=D2D1::RectF(left,y+12*scale,right,y+(24+lead_h)*scale);y=l.startup_lead.bottom+12*scale;
+        const bool overview_stack=right-left<680*scale;
+        const float overview_w=overview_stack ? right-left : (right-left-20*scale)/3;
+        for(int i=0;i<3;++i) {
+            const float x=left+(overview_stack ? 0 : i*(overview_w+10*scale));
+            const float top=y+(overview_stack ? i*82*scale : 0);
+            l.startup_overview[i]=D2D1::RectF(x,top,x+overview_w,top+72*scale);
+        }
+        y=l.startup_overview[2].bottom;
+        section(I::SettingsIntegration);
+        end_group();   // the integration card is laid out and drawn on its own
+        l.integration_section=l.section[0];
+        {
+        auto irow = [&](float h) { auto r = D2D1::RectF(left, y, right, y+h*scale); y=r.bottom; return r; };
+    const float integration_top=y;
+    auto caption_height=[&](std::wstring_view value,float width) {
+        return value.empty() ? 0.0f : painter
+            ? painter->MeasureWrappedCaptionHeight(value,(std::max)(40*scale,width)) : 42*scale;
+    };
+    {
+        const auto badge=MakeIntegrationBadge(vm);
+        const float badge_w=painter ? painter->MeasureBadgeWidth(badge.text) : 96*scale;
+        const float switch_left=right-60*scale;
+        float text_right=switch_left-24*scale-badge_w;
+        const bool stacked=text_right-(left+54*scale)<220*scale;
+        if(stacked) text_right=switch_left-12*scale;
+        const float desc_h=caption_height(l10n::Get(l10n::StringId::IntegrationMasterDesc),text_right-left-54*scale);
+        const float body=35*scale+desc_h+(stacked ? 30*scale : 0.0f)+14*scale;
+        l.default_manager_row=irow((std::max)(64.0f,body/scale));
+        const float top=l.default_manager_row.top;
+        l.integration_badge=stacked
+            ? D2D1::RectF(left+54*scale,top+35*scale+desc_h+6*scale,left+54*scale+badge_w,top+35*scale+desc_h+28*scale)
+            : D2D1::RectF(text_right+12*scale,top+21*scale,text_right+12*scale+badge_w,top+43*scale);
+        l.integration_text_right=text_right;
+    }
+    if(IntegrationHasProblem(vm)) {
+        const float bar_left=left+16*scale, bar_right=right-16*scale;
+        const float msg_h=caption_height(IntegrationProblemMessage(vm),bar_right-bar_left-60*scale);
+        const auto retry_text=l10n::Get(IntegrationRetryLabel(vm));
+        const float retry_w=!vm.settings_integration_can_retry ? 0.0f
+            : painter ? painter->MeasureButtonWidth(retry_text) : 96*scale;
+        const float restore_w=!vm.settings_integration_can_restore ? 0.0f
+            : painter ? painter->MeasureButtonWidth(l10n::Get(l10n::StringId::IntegrationRestore)) : 200*scale;
+        const float button_left=bar_left+52*scale, button_right=bar_right-12*scale;
+        const bool stack=retry_w>0 && restore_w>0 && button_left+retry_w+8*scale+restore_w>button_right;
+        const float buttons_h=(retry_w>0 || restore_w>0) ? (stack ? 72*scale : 32*scale) : 0.0f;
+        y+=4*scale;
+        l.integration_bar=D2D1::RectF(bar_left,y,bar_right,y+32*scale+msg_h+(buttons_h>0 ? 10*scale+buttons_h : 0.0f)+12*scale);
+        y=l.integration_bar.bottom+12*scale;
+        const float button_top=l.integration_bar.top+32*scale+msg_h+10*scale;
+        if(retry_w>0) l.integration_retry=D2D1::RectF(button_left,button_top,(std::min)(button_left+retry_w,button_right),button_top+32*scale);
+        if(restore_w>0) {
+            const float x=retry_w>0 && !stack ? l.integration_retry.right+8*scale : button_left;
+            const float top=retry_w>0 && stack ? button_top+40*scale : button_top;
+            l.integration_restore=D2D1::RectF(x,top,(std::min)(x+restore_w,button_right),top+32*scale);
+        }
+    }
+    l.integration_list_head=irow(32);
+    const float item_text_left=left+84*scale, item_text_right=right-16*scale;
+    const I cover_desc[]={I::StartupFolderDesc,I::StartupThisPcDesc,I::StartupWinEDesc};
+    for(int i=0;i<3;++i) {
+        const int count=IntegrationChoiceCount(i);
+        const float choice_w=(i==0 ? 220.0f : i==2 ? 440.0f : 300.0f)*scale;
+        const bool stacked=right-left<(i==2 ? 760.0f : 640.0f)*scale;
+        const bool wrapped=i==2 && right-left-70*scale<choice_w;
+        const int columns=wrapped ? 2 : count;
+        const float choice_h=(wrapped ? 72.0f : 32.0f)*scale;
+        const float text_right=stacked ? right-16*scale : right-16*scale-choice_w-16*scale;
+        const float desc_h=caption_height(l10n::Get(cover_desc[i]),text_right-left-54*scale);
+        l.integration_cover[i]=irow((std::max)(64.0f,46.0f+desc_h/scale)+(stacked ? choice_h/scale+10.0f : 0.0f));
+        const auto r=l.integration_cover[i];
+        const float choice_left=stacked ? left+54*scale : right-16*scale-choice_w;
+        const float choice_top=stacked ? r.bottom-choice_h-10*scale : (r.top+r.bottom)*0.5f-16*scale;
+        l.integration_choice[i]=D2D1::RectF(choice_left,choice_top,right-16*scale,choice_top+choice_h);
+        const float w=(l.integration_choice[i].right-choice_left)/columns;
+        for(int j=0;j<count;++j) {
+            const float top=choice_top+(j/columns)*40*scale;
+            l.integration_segments[i][j]=D2D1::RectF(choice_left+(j%columns)*w,top,choice_left+(j%columns+1)*w,top+32*scale);
+        }
+    }
+    l.recycle_bin_row=irow((std::max)(60.0f,43.0f+caption_height(l10n::Get(I::SettingsRecycleBinDesc),item_text_right-item_text_left)/scale));
+    l.integration_options_head=irow(32);
+    auto item_row=[&](l10n::StringId desc,float text_right,float extra=0.0f) {
+        const float h=caption_height(l10n::Get(desc),text_right-left-132*scale);
+        return irow((std::max)(52.0f,(31*scale+h+12*scale)/scale)+extra);
+    };
+    // Match the optional feature badge; stack it below the title on narrow pages.
+    l.explorer_windows_row=item_row(l10n::StringId::IntegrationExperimentalDesc,item_text_right,right-left<600*scale ? 24.0f : 0.0f);
+    l.folders_compat_row=item_row(l10n::StringId::IntegrationCompatDesc,item_text_right);
+    {
+        // Footer: the try-it button (while on) and one sentence about what happens now.
+        const auto hint=IntegrationHint(vm);
+        const float foot_left=left+54*scale;
+        y+=6*scale;
+        const float top=y+12*scale;
+        float text_left=foot_left, text_top=top+6*scale, bottom=top;
+        if(IntegrationShowsTry(vm)) {
+            const auto label=l10n::Get(l10n::StringId::IntegrationTry);
+            const float w=painter ? painter->MeasureButtonWidth(label,L"\xE7F4") : 200*scale;
+            l.integration_try=D2D1::RectF(foot_left,top,(std::min)(foot_left+w,item_text_right),top+32*scale);
+            bottom=l.integration_try.bottom;
+            if(item_text_right-(l.integration_try.right+12*scale)>=200*scale) text_left=l.integration_try.right+12*scale;
+            else text_top=l.integration_try.bottom+8*scale;
+        }
+        if(vm.settings_integration_just_enabled) text_left+=24*scale;
+        const float text_h=caption_height(hint,item_text_right-text_left);
+        l.integration_hint_text=D2D1::RectF(text_left,text_top,item_text_right,text_top+text_h);
+        bottom=(std::max)(bottom,l.integration_hint_text.bottom);
+        if(vm.settings_integration_enabled && (vm.settings_integration_experimental || vm.settings_integration_folders_compat) && (!vm.settings_keep_running || !vm.settings_launch_on_startup)) {
+            const auto action=l10n::Get(vm.settings_keep_running ? I::IntegrationEnableLaunch : I::IntegrationEnableKeep);
+            const float width=painter ? painter->MeasureButtonWidth(action) : 240*scale;
+            l.integration_hint_action=D2D1::RectF(foot_left,bottom+10*scale,(std::min)(item_text_right,foot_left+width),bottom+42*scale);
+            bottom=l.integration_hint_action.bottom;
+        }
+        l.integration_hint=D2D1::RectF(left,y,right,bottom+14*scale);
+        y=l.integration_hint.bottom;
+    }
+    l.integration_card=D2D1::RectF(left,integration_top,right,y);
+        }
+        section(I::StartupDialogsTitle);
+        l.dialog_management_section=l.section[l.section_count-1];
+        const bool info_problem=vm.settings_dialog_conflict || vm.settings_dialog_failed;
+        const auto badge_text=l10n::Get(info_problem ? I::StartupNeedsAttention : vm.settings_dialog_enabled ? I::StartupLaunchOn : I::StartupLaunchOff);
+        const float badge_w=painter ? painter->MeasureBadgeWidth(badge_text) : 90*scale;
+        const bool badge_stack=right-left<600*scale;
+        const float title_width=(std::max)(40*scale,right-left-(badge_stack ? 132*scale : 156*scale+badge_w));
+        const float title_h=painter ? painter->MeasureWrappedBodyHeight(l10n::Get(I::StartupDialogsToggle),title_width)/scale : 40.0f;
+        l.dialog_toggle_row=row(28+title_h+wrap_height(l10n::Get(I::StartupDialogsDesc),title_width)+(badge_stack?30.0f:0.0f));
+        const auto toggle=l.dialog_toggle_row;
+        l.dialog_badge=badge_stack ? D2D1::RectF(left+54*scale,toggle.bottom-34*scale,left+54*scale+badge_w,toggle.bottom-12*scale)
+            : D2D1::RectF(right-84*scale-badge_w,toggle.top+21*scale,right-84*scale,toggle.top+43*scale);
+        if(info_problem || vm.settings_dialog_busy) {
+            l.dialog_management_status=row((info_problem ? 64.0f : 24.0f)+wrap_height(vm.settings_dialog_status,right-left-92*scale));
+            if(info_problem) {
+                auto retry=row(56);
+                l.dialog_retry_button=D2D1::RectF(left+20*scale,retry.top+12*scale,(std::min)(right-20*scale,left+20*scale+button_w(I::IntegrationRetry,90)),retry.bottom-12*scale);
+            }
+        }
+        if(vm.settings_dialog_enabled) {
+            l.dialog_scope_button=row(42);
+        }
+        if(!vm.settings_dialog_enabled || vm.settings_dialog_scope_expanded) {
+            l.startup_dialog_info=startup_info::Layout(left,right,y,scale,painter);
+            l.dialog_management_intro=D2D1::RectF(left,y,right,l.startup_dialog_info.bottom);
+            y=l.startup_dialog_info.bottom;
+        }
+        auto action_row=[&](I desc,I action,D2D1_RECT_F& control) {
+            const float bw=(std::min)(button_w(action,150),right-left-40*scale);
+            const float text_width=right-left-(narrow?80*scale:100*scale+bw);
+            const float h=50+wrap_height(l10n::Get(desc),text_width);
+            auto r=row(h+(narrow?44.0f:0.0f));
+            const float bx=narrow?left+54*scale:right-20*scale-bw;
+            const float by=narrow?r.bottom-44*scale:r.top+16*scale;
+            control=D2D1::RectF(bx,by,(std::min)(right-20*scale,bx+bw),by+32*scale);
+            return r;
+        };
+        if(vm.settings_dialog_enabled || info_problem)
+            l.dialog_application_row=action_row(I::StartupDiagnosticsDesc,I::StartupDiagnosticsExport,l.dialog_export_button);
+        auto jump_row=[&](I title,I desc) {
+            const float width=(std::max)(40*scale,right-left-126*scale);
+            const float title_h=painter ? painter->MeasureWrappedBodyHeight(l10n::Get(title),width)/scale : 40.0f;
+            return row((std::max)(68.0f,30+title_h+wrap_height(l10n::Get(desc),width)));
+        };
+        l.dialog_jump_row=jump_row(I::DialogJumpBar,I::DialogJumpBarDesc);
+        l.dialog_jump_auto_row=jump_row(I::DialogJumpAuto,I::DialogJumpAutoDesc);
+        section(I::SettingsSecStartupTray);
+        l.startup_row[0]=row(64);
+        l.start_in_tray_row=row(64,true);
+        l.startup_row[1]=row(64);
+        l.notify_icon_card=row(seg_h); fitted_segments(l.notify_icon_card,l.notify_icon_row,{I::NotifyIconAlways,I::NotifyIconBackground,I::NotifyIconNever});
+
+        section(I::SettingsSecExplorer);
+        l.shell_tags_row=row(52+wrap_height(l10n::Get(I::SettingsShellTagsDesc),right-left-126*scale));
+        section(I::StartupRestoreSection);
+        const float restore_w=button_w(I::StartupRestoreAction,130);
+        const float restore_text_width=right-left-(narrow?108*scale:128*scale+restore_w);
+        l.startup_restore_row=row(52+wrap_height(l10n::Get(I::StartupRestoreDesc),restore_text_width)+(narrow?44.0f:0.0f));
+        const auto restore=l.startup_restore_row;
+        const float restore_x=narrow?left+54*scale:right-20*scale-restore_w;
+        const float restore_y=narrow?restore.bottom-44*scale:restore.top+16*scale;
+        l.startup_restore_button=D2D1::RectF(restore_x,restore_y,(std::min)(right-20*scale,restore_x+restore_w),restore_y+32*scale);
+
+    } else {
+        // Page 12 (文件操作) removed by customization; its rows merged into the
+        // 文件列表 page above. Page 11 keeps the network locations.
+        section(I::SidebarNetworkLocations);
+        l.lan_discovery_row=row(64);
+        l.lan_cache_card=row(seg_h,true); fitted_segments(l.lan_cache_card,l.lan_cache_row,{I::LanCache10Min,I::LanCache1Hour,I::LanCacheSession});
+        l.network_recent_row=row(64);
+        l.hidden_shares_row=row(64);
+        l.network_clear_row=row(64);
+        {
+            const float bw=button_w(I::Clear,72);
+            l.network_clear_button=D2D1::RectF(l.network_clear_row.right-16*scale-bw,l.network_clear_row.top+16*scale,
+                                               l.network_clear_row.right-16*scale,l.network_clear_row.top+48*scale);
+        }
+    }
+    end_group();
+    y+=14*scale; l.footer=D2D1::RectF(left,y,right,y+28*scale); y+=28*scale+16*scale;
+    return y;
+}
+
+float LayoutSettingsContent(SettingsLayout& l, const WindowViewModel& vm, float scale,
+                           float y, const fluent::Painter* painter) {
+    const float left=l.content.left+20*scale,right=l.content.right-20*scale;
+    const bool narrow=right-left<560*scale;
+    auto row=[&](float h) { auto r=D2D1::RectF(left,y,right,y+h*scale);y=r.bottom;return r; };
+    y+=14*scale; l.section[1]=row(28);
+    l.content_header=row(72);
+    l.content_types=row(narrow ? 236.0f : 160.0f);
+    if(vm.settings_content_folders.empty()) l.content_empty=row(84);
+    else if (!vm.settings_content_instant) {
+        auto r=row(52);
+        const float bw=painter ? painter->MeasureButtonWidth(l10n::Get(vm.settings_content_paused ? l10n::StringId::ContentIndexResume : l10n::StringId::ContentIndexPause)) : 150*scale;
+        l.content_pause=D2D1::RectF(left+16*scale,r.top+10*scale,left+16*scale+bw,r.bottom-10*scale);
+    }
+    l.content_options=row(64);
+    if(!vm.settings_content_instant && !vm.settings_content_folders.empty()) l.content_rebuild=row(64);
+    l.group[1]=D2D1::RectF(left,l.content_header.top,right,y);
+    y+=8*scale; l.footer=row(40);
+    y+=24*scale;
+    return y;
+}
+
+// ---- 预览增强包 page (5) ---------------------------------------------------
+// Texts shared by layout (measuring) and drawing. l10n::Pick converts to
+// Traditional Chinese at run time, like the Quick Look format catalog.
+namespace pack_text {
+inline const wchar_t* Title() { return l10n::Get(l10n::StringId::QuickPreview).c_str(); }
+inline const wchar_t* Intro() { return l10n::Get(l10n::StringId::HoverOverOrPressSpaceToPreviewFilesChooseHowExploreFormatSup).c_str(); }
+inline const wchar_t* TriggerSection() { return l10n::Get(l10n::StringId::PreviewTrigger).c_str(); }
+inline const wchar_t* TriggerTitle() { return l10n::Get(l10n::StringId::OpenPreviews).c_str(); }
+inline const wchar_t* TriggerDesc(int trigger) {
+    return trigger == 1
+        ? l10n::Get(l10n::StringId::SelectAFileAndPressSpace).c_str()
+        : l10n::Get(l10n::StringId::RestThePointerOnAFileForAPreviewCardSpaceStillOpensTheFullPr).c_str();
+}
+inline const wchar_t* TriggerChoice(int i) {
+    return i == 0 ? l10n::Get(l10n::StringId::Hover).c_str() : l10n::Get(l10n::StringId::Space).c_str();
+}
+inline const wchar_t* DelayTitle() { return l10n::Get(l10n::StringId::HoverDelay).c_str(); }
+inline const wchar_t* DelayDesc() { return l10n::Get(l10n::StringId::HowLongThePointerRestsBeforeTheCardAppears).c_str(); }
+inline const wchar_t* DelayChoice(int i) {
+    if (i == 0) return l10n::Get(l10n::StringId::S03S).c_str();
+    if (i == 1) return l10n::Get(l10n::StringId::S05S).c_str();
+    return l10n::Get(l10n::StringId::S08S).c_str();
+}
+inline const wchar_t* SizeTitle() { return l10n::Get(l10n::StringId::CardSize).c_str(); }
+inline const wchar_t* SizeDesc() {
+    return l10n::Get(l10n::StringId::FollowsTheContentSShapeHoldCtrlToEnlarge).c_str();
+}
+inline const wchar_t* SizeChoice(int i) {
+    if (i == 0) return l10n::Get(l10n::StringId::UiFontSmall).c_str();
+    if (i == 1) return l10n::Get(l10n::StringId::Medium).c_str();
+    if (i == 2) return l10n::Get(l10n::StringId::UiFontLarge).c_str();
+    return l10n::Get(l10n::StringId::HoverSizeXLarge).c_str();
+}
+inline const wchar_t* HoldTitle() { return l10n::Get(l10n::StringId::HoldPreviewTitle).c_str(); }
+inline const wchar_t* HoldDesc() { return l10n::Get(l10n::StringId::HoldPreviewDesc).c_str(); }
+inline const wchar_t* HoldChoice(int i) {
+    if (i == 0) return l10n::Get(l10n::StringId::HoldPreviewOff).c_str();
+    return DelayChoice(i - 1);
+}
+inline const wchar_t* WindowSection() { return l10n::Get(l10n::StringId::PreviewWindowSection).c_str(); }
+inline const wchar_t* WindowSizeTitle() { return l10n::Get(l10n::StringId::PreviewSizeTitle).c_str(); }
+inline const wchar_t* WindowSizeDesc() { return l10n::Get(l10n::StringId::PreviewSizeDesc).c_str(); }
+inline const wchar_t* WindowSizeChoice(int i) {
+    using I = l10n::StringId;
+    static constexpr I ids[5] = {I::PreviewSizeFit, I::PreviewSizeStandard, I::PreviewSizeLarge,
+                                 I::PreviewSizeMaximized, I::PreviewSizeFullScreen};
+    return l10n::Get(ids[i < 0 || i > 4 ? 0 : i]).c_str();
+}
+inline const wchar_t* RememberTitle() { return l10n::Get(l10n::StringId::PreviewRememberSize).c_str(); }
+inline const wchar_t* RememberDesc() { return l10n::Get(l10n::StringId::PreviewRememberDesc).c_str(); }
+inline const wchar_t* SpaceTitle() { return l10n::Get(l10n::StringId::PreviewSpaceTitle).c_str(); }
+inline const wchar_t* SpaceDesc() { return l10n::Get(l10n::StringId::PreviewSpaceDesc).c_str(); }
+inline const wchar_t* SpaceChoice(int i) {
+    return i == 0 ? l10n::Get(l10n::StringId::PreviewSpaceClose).c_str()
+                  : l10n::Get(l10n::StringId::PreviewSpacePlay).c_str();
+}
+inline const wchar_t* LoopTitle() { return l10n::Get(l10n::StringId::PreviewLoopTitle).c_str(); }
+inline const wchar_t* LoopDesc() { return l10n::Get(l10n::StringId::PreviewLoopDesc).c_str(); }
+inline const wchar_t* LoopChoice(int i) {
+    if (i == 0) return l10n::Get(l10n::StringId::PreviewLoopAnimations).c_str();
+    if (i == 1) return l10n::Get(l10n::StringId::PreviewLoopAll).c_str();
+    return l10n::Get(l10n::StringId::PreviewLoopNone).c_str();
+}
+inline const wchar_t* PacksSection() { return l10n::Get(l10n::StringId::PreviewPacks).c_str(); }
+inline const wchar_t* PacksIntro() { return l10n::Get(l10n::StringId::PacksPageIntro).c_str(); }
+inline const wchar_t* ManagePacks() { return l10n::Get(l10n::StringId::ManagePacks).c_str(); }
+inline const wchar_t* SearchSection() { return l10n::Get(l10n::StringId::PackSearchSection).c_str(); }
+inline const wchar_t* ContentTitle() { return l10n::Get(l10n::StringId::ContentPackTitle).c_str(); }
+inline const wchar_t* ContentDesc() { return l10n::Get(l10n::StringId::ContentPackDesc).c_str(); }
+inline const wchar_t* ContentMeta() { return l10n::Get(l10n::StringId::ContentPackMeta).c_str(); }
+inline const wchar_t* OcrTitle() { return l10n::Get(l10n::StringId::OcrPackTitle).c_str(); }
+inline const wchar_t* OcrDesc() { return l10n::Get(l10n::StringId::OcrPackDesc).c_str(); }
+inline const wchar_t* ComingSoon() { return l10n::Get(l10n::StringId::PackComingSoon).c_str(); }
+// app::ContentPackState: 0 bundled (dev build), 1 ready, 2 missing, 3 outdated, 4 damaged, 5 unavailable.
+inline bool ContentReady(const WindowViewModel& vm) {
+    return vm.settings_content_pack_state == 0 || vm.settings_content_pack_state == 1;
+}
+inline bool ContentAvailable(const WindowViewModel& vm) { return vm.settings_content_pack_state != 5; }
+inline const wchar_t* ContentPrimary(const WindowViewModel& vm) {
+    return ContentReady(vm) ? l10n::Get(l10n::StringId::ManageContentIndex).c_str()
+                            : l10n::Get(l10n::StringId::DownloadAndInstall).c_str();
+}
+inline std::wstring UpdateAll(int count) {
+    return std::wstring(l10n::Get(l10n::StringId::UpdateAllPacks).c_str()) + L" (" + std::to_wstring(count) + L")";
+}
+inline const wchar_t* FormatsSection() { return l10n::Get(l10n::StringId::Formats).c_str(); }
+inline std::wstring FormatsSummary(const WindowViewModel& vm) {
+    const int packs = int(vm.settings_pack_media_installed) + int(vm.settings_pack_images_installed) +
+                      int(vm.settings_pack_raw_installed);
+    int codecs = 0;
+    for (int i = 0; i < kPreviewCodecCount; ++i) if (vm.settings_preview_codecs & (1u << i)) ++codecs;
+    const auto count = std::to_wstring(PreviewFormatCount());
+    std::wstring result = l10n::IsChinese()
+        ? l10n::Cn(L"共 ") + count + l10n::Cn(L" 种格式 · 增强包 ") + std::to_wstring(packs) + L"/3"
+        : count + L" formats · Preview packs " + std::to_wstring(packs) + L"/3";
+    if (vm.settings_preview_codecs & kPreviewCodecsDetected)
+        result += std::wstring(l10n::Get(l10n::StringId::SystemExtensions_2).c_str()) + std::to_wstring(codecs) + L"/4";
+    else result += l10n::Get(l10n::StringId::CheckingSystemExtensions).c_str();
+    return result;
+}
+inline const wchar_t* FormatsTitle() { return l10n::Get(l10n::StringId::SupportedFormats).c_str(); }
+inline const wchar_t* SystemTitle() { return l10n::Get(l10n::StringId::SystemExtensions).c_str(); }
+inline const wchar_t* Legend(int source) {
+    if (source == 0) return l10n::Get(l10n::StringId::BuiltIn).c_str();
+    if (source == 1) return l10n::Get(l10n::StringId::PreviewPack).c_str();
+    return l10n::Get(l10n::StringId::PackOrSystemExtension).c_str();
+}
+inline const wchar_t* LegendNote() { return l10n::Get(l10n::StringId::DashedEnhancedSupportIsNotEnabled).c_str(); }
+inline const wchar_t* SystemHint(const WindowViewModel& vm) { return vm.settings_pack_images_installed && vm.settings_pack_images_enabled
+    ? l10n::Get(l10n::StringId::TheImagePackIsEnabledItDecodesHEICAVIFWithoutTheCorrespondin).c_str()
+    : l10n::Get(l10n::StringId::TheImagePackAlsoSupportsHEICAVIFWithoutAMicrosoftAccount).c_str(); }
+
+inline const wchar_t* OpenFolder() { return l10n::Get(l10n::StringId::OpenFolder).c_str(); }
+inline const wchar_t* Media() { return l10n::Get(l10n::StringId::Media).c_str(); }
+inline const wchar_t* Advanced() { return l10n::Get(l10n::StringId::Advanced_2).c_str(); }
+inline const wchar_t* MediaTitle() { return l10n::Get(l10n::StringId::FFmpegMedia).c_str(); }
+inline const wchar_t* MediaDesc() { return l10n::Get(l10n::StringId::ThumbnailsPlayingTimeAndMediaDetailsForVideosWindowsHasNoDec).c_str(); }
+inline const wchar_t* MediaMeta() { return l10n::Get(l10n::StringId::LGPL21DecodeOnlyBuildNoGPLParts).c_str(); }
+inline const wchar_t* Images() { return l10n::Get(l10n::StringId::Images_2).c_str(); }
+inline const wchar_t* ImagesTitle() { return l10n::Get(l10n::StringId::ModernImageFormats).c_str(); }
+inline const wchar_t* ImagesDesc() { return l10n::Get(l10n::StringId::PreviewIPhonePhotosHEICAVIFJPEGXLAndHDREXRPicturesWithoutThe).c_str(); }
+inline const wchar_t* ImagesMeta() { return l10n::Get(l10n::StringId::LibheifDav1dLibjxlOpenEXRLGPL30BSD).c_str(); }
+inline const wchar_t* RawTitle() { return l10n::Get(l10n::StringId::RAWCameraPhotos).c_str(); }
+inline const wchar_t* RawDesc() { return l10n::Get(l10n::StringId::UseLibRawForPreviewsAndThumbnailsOfCameraOriginalsSuchAsCR2C).c_str(); }
+inline const wchar_t* RawMeta() { return L"LibRaw · LGPL-2.1 / CDDL"; }
+inline const wchar_t* Install() { return l10n::Get(l10n::StringId::DownloadAndInstall).c_str(); }
+inline const wchar_t* Remove() { return l10n::Get(l10n::StringId::Remove_2).c_str(); }
+inline const wchar_t* CustomTitle() { return l10n::Get(l10n::StringId::UseExistingFFmpeg).c_str(); }
+inline const wchar_t* CustomDesc() { return l10n::Get(l10n::StringId::OptionalSourceTurnOffToUseThePulseManagedPack).c_str(); }
+inline const wchar_t* NoCustom() { return l10n::Get(l10n::StringId::NoFfmpegExeChosen).c_str(); }
+inline const wchar_t* Browse() { return l10n::Get(l10n::StringId::Browse).c_str(); }
+inline const wchar_t* UseDetected() { return l10n::Get(l10n::StringId::UseFound).c_str(); }
+inline const wchar_t* RemoveTitle() { return l10n::Get(l10n::StringId::RemovePacksWhenUninstallingPulse).c_str(); }
+inline const wchar_t* RemoveDesc() { return l10n::Get(l10n::StringId::OtherwiseTheyStayAndWorkAgainAfterReinstallingPulse).c_str(); }
+inline const wchar_t* AutoUpdateTitle() { return l10n::Get(l10n::StringId::UpdatePreviewPacksAutomatically).c_str(); }
+inline const wchar_t* AutoUpdateDesc() { return l10n::Get(l10n::StringId::RunsWithThePulseUpdateCheckAndDownloadsInTheBackground).c_str(); }
+inline const wchar_t* Note() { return l10n::Get(l10n::StringId::PacksRunInTheIsolatedPreviewProcessACrashOrTimeoutOnlyAffect).c_str(); }
+inline std::wstring Bytes(uint64_t bytes) {
+    wchar_t text[48]{};
+    if (bytes >= 1024ull * 1024 * 1024) swprintf_s(text, L"%.1f GB", bytes / (1024.0 * 1024 * 1024));
+    else if (bytes >= 1024ull * 1024) swprintf_s(text, L"%.0f MB", bytes / (1024.0 * 1024));
+    else swprintf_s(text, L"%.0f KB", bytes / 1024.0);
+    return text;
+}
+inline std::wstring Summary(const WindowViewModel& vm) {
+    if (!vm.settings_pack_installed) return l10n::Get(l10n::StringId::NoPreviewPacksInstalled).c_str();
+    wchar_t text[128]{};
+    swprintf_s(text, l10n::Get(l10n::StringId::UInstalledS).c_str(),
+               vm.settings_pack_installed, Bytes(vm.settings_pack_bytes).c_str());
+    return text;
+}
+inline std::wstring Found(const std::wstring& path) {
+    return std::wstring(l10n::Get(l10n::StringId::Found).c_str()) + path;
+}
+struct Badge { std::wstring text; fluent::BadgeKind kind = fluent::BadgeKind::Neutral; };
+inline Badge ContentBadge(const WindowViewModel& vm) {
+    switch (vm.settings_content_pack_state) {
+    case 0: return {l10n::Get(l10n::StringId::ContentPackBundled).c_str(), fluent::BadgeKind::Success};
+    case 1: return {l10n::Get(l10n::StringId::Installed).c_str(), fluent::BadgeKind::Success};
+    case 3: case 4: return {l10n::Get(l10n::StringId::ContentPackRepair).c_str(), fluent::BadgeKind::Warning};
+    default: return {l10n::Get(l10n::StringId::NotInstalled).c_str(), fluent::BadgeKind::Neutral};
+    }
+}
+inline Badge OcrBadge() { return {l10n::Get(l10n::StringId::PackPlanned).c_str(), fluent::BadgeKind::Neutral}; }
+inline const wchar_t* PrimaryLabel(bool available, bool installed, bool installing) {
+    if (installing) return l10n::Get(l10n::StringId::Cancel).c_str();
+    if (installed) return Remove();
+    return available ? Install() : l10n::Get(l10n::StringId::NotPublished).c_str();
+}
+inline bool PrimaryEnabled(bool available, bool installed, bool installing) {
+    return available || installed || installing;
+}
+// The AI pack: settings_ai_pack_state holds app::AiPackState (the content
+// pack's values). Usable (bundled or installed): 管理 opens the AI page (kSettingsPageAi), which
+// holds the uninstall.
+inline const wchar_t* AiSection() { return l10n::Get(l10n::StringId::AiPackSection).c_str(); }
+inline const wchar_t* AiTitle() { return l10n::Get(l10n::StringId::AiPackTitle).c_str(); }
+inline const wchar_t* AiDesc() { return l10n::Get(l10n::StringId::AiPackDesc).c_str(); }
+inline const wchar_t* AiMeta() { return l10n::Get(l10n::StringId::AiPackMeta).c_str(); }
+inline bool AiInstalled(const WindowViewModel& vm) { return vm.settings_ai_pack_state == 1; }
+inline bool AiUsable(const WindowViewModel& vm) { return vm.settings_ai_pack_state == 0 || AiInstalled(vm); }
+inline bool AiAvailable(const WindowViewModel& vm) { return vm.settings_ai_pack_state != 5; }
+inline Badge AiBadge(const WindowViewModel& vm) {
+    switch (vm.settings_ai_pack_state) {
+    case 0: return {l10n::Get(l10n::StringId::ContentPackBundled).c_str(), fluent::BadgeKind::Success};
+    case 1: return {l10n::Get(l10n::StringId::Installed).c_str(), fluent::BadgeKind::Success};
+    case 3: case 4: return {l10n::Get(l10n::StringId::ContentPackRepair).c_str(), fluent::BadgeKind::Warning};
+    default: return {l10n::Get(l10n::StringId::NotInstalled).c_str(), fluent::BadgeKind::Neutral};
+    }
+}
+inline const wchar_t* AiPrimary(const WindowViewModel& vm) {
+    if (AiUsable(vm) && !vm.settings_ai_pack_installing) return l10n::Get(l10n::StringId::AiManage).c_str();
+    return PrimaryLabel(AiAvailable(vm), AiInstalled(vm), vm.settings_ai_pack_installing);
+}
+inline bool AiPrimaryEnabled(const WindowViewModel& vm) {
+    return AiUsable(vm) || PrimaryEnabled(AiAvailable(vm), AiInstalled(vm), vm.settings_ai_pack_installing);
+}
+inline PackAction AiAction(const WindowViewModel& vm) {
+    if (vm.settings_ai_pack_installing) return PackAction::AiCancel;
+    return AiUsable(vm) ? PackAction::AiManage : PackAction::AiInstall;
+}
+// "更新到 1.0.2" beside 卸载 while an installed pack is older than the
+// catalog; empty (no button) while it downloads or when it is current.
+inline std::wstring UpdateLabel(bool installed, bool installing, const std::wstring& version) {
+    if (!installed || installing || version.empty()) return {};
+    return std::wstring(l10n::Get(l10n::StringId::UpdateTo).c_str()) + version;
+}
+inline Badge PackBadge(bool available, bool installed, bool installing, bool enabled, const std::wstring& version) {
+    if (installing) return {installed ? l10n::Get(l10n::StringId::Updating).c_str() : l10n::Get(l10n::StringId::Installing).c_str(),
+                            fluent::BadgeKind::Accent};
+    if (!installed) return {l10n::Pick(available ? L"未安装" : L"尚未发布", available ? L"Not installed" : L"Not published"), fluent::BadgeKind::Neutral};
+    if (!enabled) return {l10n::Get(l10n::StringId::Off).c_str(), fluent::BadgeKind::Neutral};
+    std::wstring text = l10n::Get(l10n::StringId::Installed).c_str();
+    if (!version.empty()) text += L" " + version;
+    return {text, fluent::BadgeKind::Success};
+}
+// The user's own FFmpeg is selected and valid: the pack is not used at all.
+inline bool MediaLocalInUse(const WindowViewModel& vm) {
+    return vm.settings_pack_use_custom && vm.settings_pack_ffmpeg == 2 && !vm.settings_pack_installing;
+}
+inline Badge MediaBadge(const WindowViewModel& vm) {
+    if (MediaLocalInUse(vm))
+        return {l10n::Get(l10n::StringId::MediaPackUnused).c_str(), fluent::BadgeKind::Neutral};
+    return PackBadge(vm.settings_pack_media_available, vm.settings_pack_media_installed,
+        vm.settings_pack_installing, true, vm.settings_pack_version);
+}
+inline const wchar_t* Primary(const WindowViewModel& vm) {
+    // Nothing to download while the local FFmpeg is used; an installed pack can still be removed.
+    if (MediaLocalInUse(vm) && !vm.settings_pack_media_installed) return L"";
+    return PrimaryLabel(vm.settings_pack_media_available, vm.settings_pack_media_installed, vm.settings_pack_installing);
+}
+inline std::wstring MediaNotice(const WindowViewModel& vm) {
+    if (!vm.settings_pack_notice.empty() || !MediaLocalInUse(vm)) return vm.settings_pack_notice;
+    return l10n::Get(vm.settings_pack_media_installed ? l10n::StringId::MediaPackLocalNoticeInstalled
+                                                      : l10n::StringId::MediaPackLocalNotice).c_str();
+}
+inline std::wstring MediaUpdate(const WindowViewModel& vm) {
+    if (MediaLocalInUse(vm)) return {};
+    return UpdateLabel(vm.settings_pack_media_installed, vm.settings_pack_installing, vm.settings_pack_update_version);
+}
+inline const wchar_t* SourceTitle() { return l10n::Get(l10n::StringId::EnableMediaEnhancement).c_str(); }
+inline const wchar_t* SourceStatus(const WindowViewModel& vm) {
+    if (!vm.settings_pack_use_custom && !vm.settings_pack_media_installed)
+        return vm.settings_pack_media_available
+            ? l10n::Get(l10n::StringId::NoMediaSourceAvailableDownloadAPackOrChooseExistingFFmpeg).c_str()
+            : l10n::Get(l10n::StringId::NoMediaSourceAvailableChooseExistingFFmpeg).c_str();
+    if (vm.settings_pack_use_custom && vm.settings_pack_ffmpeg != 2)
+        return l10n::Get(l10n::StringId::SourceExistingFFmpegInvalidPathChooseAgain).c_str();
+    if (!vm.settings_pack_ffmpeg_enabled)
+        return vm.settings_pack_use_custom
+            ? l10n::Get(l10n::StringId::OffSelectedSourceExistingFFmpeg).c_str()
+            : l10n::Get(l10n::StringId::OffSelectedSourcePulseManagedPack).c_str();
+    if (vm.settings_pack_use_custom)
+        return l10n::Get(l10n::StringId::SourceExistingFFmpegUserFileNotVerified).c_str();
+    return l10n::Get(l10n::StringId::SourcePulseManagedPack).c_str();
+}
+// "正在下载… 42%" while a pack downloads.
+inline std::wstring Downloading(float progress) {
+    const int percent = static_cast<int>(progress * 100.0f + 0.5f);
+    return std::wstring(l10n::Get(l10n::StringId::Downloading).c_str()) +
+           std::to_wstring(percent < 0 ? 0 : percent > 100 ? 100 : percent) + L"%";
+}
+inline std::wstring Downloading(const WindowViewModel& vm) { return Downloading(vm.settings_pack_progress); }
+inline Badge ImagesBadge(const WindowViewModel& vm) {
+    return PackBadge(vm.settings_pack_images_available, vm.settings_pack_images_installed,
+        vm.settings_pack_images_installing, vm.settings_pack_images_enabled, vm.settings_pack_images_version);
+}
+inline const wchar_t* ImagesPrimary(const WindowViewModel& vm) {
+    return PrimaryLabel(vm.settings_pack_images_available, vm.settings_pack_images_installed, vm.settings_pack_images_installing);
+}
+inline bool ShowsImagesEnable(const WindowViewModel& vm) { return vm.settings_pack_images_installed; }
+inline std::wstring ImagesUpdate(const WindowViewModel& vm) {
+    return UpdateLabel(vm.settings_pack_images_installed, vm.settings_pack_images_installing,
+                       vm.settings_pack_images_update_version);
+}
+inline Badge RawBadge(const WindowViewModel& vm) {
+    return PackBadge(vm.settings_pack_raw_available, vm.settings_pack_raw_installed,
+        vm.settings_pack_raw_installing, vm.settings_pack_raw_enabled, vm.settings_pack_raw_version);
+}
+inline const wchar_t* RawPrimary(const WindowViewModel& vm) {
+    return PrimaryLabel(vm.settings_pack_raw_available, vm.settings_pack_raw_installed, vm.settings_pack_raw_installing);
+}
+inline bool ShowsRawEnable(const WindowViewModel& vm) { return vm.settings_pack_raw_installed; }
+inline std::wstring RawUpdate(const WindowViewModel& vm) {
+    return UpdateLabel(vm.settings_pack_raw_installed, vm.settings_pack_raw_installing, vm.settings_pack_raw_update_version);
+}
+// Switch and path rows exist once there is something to switch.
+inline bool ShowsEnable(const WindowViewModel& vm) { return vm.settings_pack_ffmpeg != 0 || vm.settings_pack_use_custom; }
+inline bool ShowsPath(const WindowViewModel&) {
+    return true;
+}
+inline bool ShowsDetect(const WindowViewModel& vm) {
+    return !vm.settings_pack_detected_path.empty() &&
+        _wcsicmp(vm.settings_pack_detected_path.c_str(), vm.settings_pack_custom_path.c_str()) != 0;
+}
+// 高级 > 下载源 and 测速.
+inline const wchar_t* DownloadSourceTitle() { return l10n::Get(l10n::StringId::DownloadSourceTitle).c_str(); }
+inline const wchar_t* DownloadSourceDesc() { return l10n::Get(l10n::StringId::DownloadSourceDesc).c_str(); }
+// By stored value (app::UpdateSource): 0 自动, 1 GitHub, 2 镜像 1, 3 镜像 2.
+inline const wchar_t* SourceName(uint32_t source) {
+    using I = l10n::StringId;
+    const I ids[] = {I::UpdateSourceAuto, I::UpdateSourceGitHub, I::UpdateSourceMirror1, I::UpdateSourceMirror2};
+    return l10n::Get(ids[source < 4 ? source : 0]).c_str();
+}
+inline const wchar_t* SpeedTestTitle() { return l10n::Get(l10n::StringId::SpeedTestTitle).c_str(); }
+inline const wchar_t* SpeedTestDesc() { return l10n::Get(l10n::StringId::SpeedTestDesc).c_str(); }
+inline bool SpeedTestRan(const WindowViewModel& vm) {
+    for (const int ms : vm.settings_pack_speed_ms) if (ms != -1) return true;
+    return false;
+}
+inline bool SpeedTestRunning(const WindowViewModel& vm) {
+    for (const int ms : vm.settings_pack_speed_ms) if (ms == -2) return true;
+    return false;
+}
+inline const wchar_t* SpeedTestButton(const WindowViewModel& vm) {
+    return l10n::Get(SpeedTestRan(vm) ? l10n::StringId::SpeedTestAgain : l10n::StringId::SpeedTestStart).c_str();
+}
+// Milliseconds as "320 ms" / "1.2 s".
+inline std::wstring SpeedTime(int ms) {
+    wchar_t text[32]{};
+    if (ms < 1000) swprintf_s(text, L"%d ms", ms);
+    else swprintf_s(text, L"%.1f s", static_cast<double>(ms) / 1000.0);
+    return text;
+}
+// 测速 row `row` (0 镜像 1, 1 镜像 2, 2 GitHub): the source, GitHub with its proxy.
+inline std::wstring SpeedRowName(const WindowViewModel& vm, int row) {
+    if (row == 0) return SourceName(2);
+    if (row == 1) return SourceName(3);
+    if (vm.settings_pack_proxy.empty()) return SourceName(1);
+    std::wstring text = l10n::Get(l10n::StringId::SpeedTestViaProxy);
+    const size_t at = text.find(L"{proxy}");
+    if (at != std::wstring::npos) text.replace(at, 7, vm.settings_pack_proxy);
+    return text;
+}
+inline std::wstring SpeedRowStatus(int ms) {
+    using I = l10n::StringId;
+    if (ms == -1) return l10n::Get(I::SpeedTestNotRun);
+    if (ms == -2) return l10n::Get(I::SpeedTestRunning);
+    if (ms < 0) return l10n::Get(I::SpeedTestFail);
+    std::wstring text = l10n::Get(I::SpeedTestOk);
+    const size_t at = text.find(L"{time}");
+    if (at != std::wstring::npos) text.replace(at, 6, SpeedTime(ms));
+    return text;
+}
+} // namespace pack_text
+
+namespace store_text {
+inline const std::wstring& State(const ExtensionStoreView& view) {
+    using I = l10n::StringId;
+    switch (view.state) {
+    case ExtensionStoreView::State::Loading: return l10n::Get(I::StoreLoading);
+    case ExtensionStoreView::State::Failed: return l10n::Get(I::StoreFailed);
+    case ExtensionStoreView::State::Offline: return l10n::Get(I::StoreOffline);
+    case ExtensionStoreView::State::Online: return l10n::Get(I::StoreOnline);
+    default: return l10n::Get(I::StoreIdle);
+    }
+}
+inline bool CanRefresh(const ExtensionStoreView& view) {
+    return !view.busy && view.state != ExtensionStoreView::State::Loading;
+}
+inline bool CanRefreshInstalled(const ExtensionStoreView& view) {
+    return !view.installed_busy && !view.installed_loading;
+}
+inline const std::wstring& Tab(int index) {
+    using I = l10n::StringId;
+    return l10n::Get(index == 0 ? I::StoreBrowse : index == 1 ? I::StoreInstalled : I::StoreManage);
+}
+inline const std::wstring& InstalledIntro() { return l10n::Get(l10n::StringId::StoreInstalledIntro); }
+inline const std::wstring& InstalledBadge(const InstalledExtensionItem& item) {
+    return l10n::Get(item.enabled ? l10n::StringId::StoreExtensionEnabled : l10n::StringId::StoreExtensionDisabled);
+}
+}
+
+// Shared geometry for drawing and hit tests. All captions use the same measured
+// width at paint time, including publisher, status and long untrusted summaries.
+float LayoutSettingsStore(SettingsLayout& l, const WindowViewModel& vm, float s,
+                          float y, const fluent::Painter* painter) {
+    using I = l10n::StringId;
+    const auto& view = vm.settings_store_view;
+    const float left = l.content.left + 20*s, right = l.content.right - 20*s;
+    const float font = static_cast<float>(vm.settings_ui_font_scale)/100;
+    auto height = [&](std::wstring_view value, float w) {
+        return value.empty() ? 0.0f : painter ? painter->MeasureWrappedCaptionHeight(value, (std::max)(1.0f, w)) : 40*s*font;
+    };
+    auto caption = [&](std::wstring_view value, float inset = 0.0f) {
+        const auto r = D2D1::RectF(left+inset, y, right-inset, y+height(value, right-left-2*inset));
+        y = r.bottom+12*s; return r;
+    };
+    auto width = [&](std::wstring_view value) {
+        return (std::min)(right-left, painter ? painter->MeasureButtonWidth(value) : 144*s*font);
+    };
+    const float bh = 32*s*font;
+    const float rw = width(l10n::Get(I::Refresh));
+    l.store_refresh = D2D1::RectF(left,y,left+rw,y+bh);
+    if (view.busy) {
+        const float cw = width(l10n::Get(I::Cancel));
+        const bool stack = rw+8*s+cw > right-left;
+        const float x = stack ? left : left+rw+8*s;
+        l.store_cancel = D2D1::RectF(x, y+(stack ? bh+8*s : 0), (std::min)(right,x+cw), y+(stack ? 2*bh+8*s : bh));
+    }
+    y = (std::max)(l.store_refresh.bottom,l.store_cancel.bottom)+12*s;
+    const auto state = store_text::State(view);
+    l.store_state = caption(state);
+    y += 4*s;
+    l.store_trust = caption(l10n::Get(I::StoreTrust),12*s);
+    y += 8*s;
+    if (!view.notice.empty()) { l.store_notice = caption(view.notice,12*s); y += 8*s; }
+    if (view.pending_restart) { l.store_restart = caption(l10n::Get(I::StoreRestart),12*s); y += 8*s; }
+    l.store_manage = caption(l10n::Get(I::StoreOfficialManage),12*s);
+    y += 12*s;
+    const bool listed = view.state == ExtensionStoreView::State::Online || view.state == ExtensionStoreView::State::Offline;
+    if (view.items.empty() && listed) {
+        l.store_section = caption(l10n::Get(I::StoreCommunity));
+        y += 20*s;
+        l.store_empty = caption(l10n::Get(I::StoreEmpty),16*s);
+        return y+36*s;
+    }
+    const int columns = right-left >= 660*s*font ? 2 : 1;
+    const float gap = 12*s, w = (right-left-gap*(columns-1))/columns;
+    // Official packages first, then the community; store_items stays indexed like view.items.
+    l.store_items.assign(view.items.size(), {});
+    float row_bottom = y;
+    for (const bool official : {true, false}) {
+    size_t placed = 0;
+    for (size_t i=0; i<view.items.size(); ++i) {
+        const auto& item=view.items[i];
+        if (item.official != official) continue;
+        if (!placed) {
+            y = row_bottom;
+            if (official) l.store_section = caption(l10n::Get(I::StoreOfficial));
+            else l.store_community_section = caption(l10n::Get(I::StoreCommunity));
+            row_bottom = y;
+        }
+        if (placed && placed%columns==0) { y=row_bottom+gap; }
+        SettingsLayout::StoreCard c;
+        const float x=left+static_cast<float>(placed%columns)*(w+gap);
+        ++placed;
+        const float tl=x+16*s, tr=x+w-16*s, tw=tr-tl;
+        // Header: an icon tile, then the name over the publisher line. Below: summary, status, and a footer
+        // with the version and size on the left and the action on the right.
+        const float tile=44*s, tx=tl+tile+12*s;
+        float cy=y+16*s;
+        c.icon=D2D1::RectF(tl,cy,tl+tile,cy+tile);
+        const float name_h=painter ? painter->MeasureWrappedSectionHeight(item.name,(std::max)(1.0f,tr-tx)) : 24*s;
+        c.name=D2D1::RectF(tx,cy,tr,cy+name_h);
+        c.publisher=D2D1::RectF(tx,c.name.bottom+2*s,tr,c.name.bottom+2*s+height(item.publisher.empty()?L"x":item.publisher,tr-tx-18*s));
+        cy=(std::max)(c.icon.bottom,c.publisher.bottom)+12*s;
+        auto field=[&](std::wstring_view value, float after) {
+            auto r=D2D1::RectF(tl,cy,tr,cy+height(value,tw)); cy=r.bottom+(value.empty()?0:after*s); return r;
+        };
+        c.summary=field(item.summary,10);
+        c.status=field(item.status,10);
+        cy+=2*s;
+        c.version=D2D1::RectF(tl,cy,tr,cy+bh);
+        if (!item.button_label.empty()) {
+            const float bw=(std::min)(tw,painter ? painter->MeasureButtonWidth(item.button_label) : 144*s*font);
+            c.button=D2D1::RectF(tr-bw,cy,tr,cy+bh);
+            c.version.right=(std::max)(c.version.left,c.button.left-12*s);
+        }
+        cy+=bh;
+        c.bounds=D2D1::RectF(x,y,x+w,cy+16*s);
+        row_bottom=(std::max)(row_bottom,c.bounds.bottom);
+        l.store_items[i]=c;
+    }
+    if (placed) row_bottom += 24*s;
+    else if (!official && listed) {  // the community section is shown even when it is empty
+        y = row_bottom;
+        l.store_community_section = caption(l10n::Get(I::StoreCommunity));
+        l.store_empty = caption(l10n::Get(I::StoreCommunityEmpty),16*s);
+        row_bottom = y + 12*s;
+    }
+    }
+    return row_bottom;
+}
+
+float LayoutSettingsInstalled(SettingsLayout& l, const WindowViewModel& vm, float s,
+                              float y, const fluent::Painter* painter) {
+    using I = l10n::StringId;
+    const auto& view = vm.settings_store_view;
+    const float left = l.content.left + 20*s, right = l.content.right - 20*s;
+    const float font = static_cast<float>(vm.settings_ui_font_scale)/100;
+    const float bh = 32*s*font;
+    auto height = [&](std::wstring_view value, float width) {
+        return value.empty() ? 0.0f : painter ? painter->MeasureWrappedCaptionHeight(value, (std::max)(1.0f,width)) : 40*s*font;
+    };
+    auto width = [&](std::wstring_view value) {
+        return painter ? painter->MeasureButtonWidth(value) : 144*s*font;
+    };
+    auto caption = [&](std::wstring_view value, float inset = 0.0f) {
+        const auto r = D2D1::RectF(left+inset,y,right-inset,y+height(value,right-left-2*inset));
+        y = r.bottom+20*s; return r;
+    };
+    l.store_refresh = D2D1::RectF(left,y,(std::min)(right,left+width(l10n::Get(I::Refresh))),y+bh);
+    y = l.store_refresh.bottom+12*s;
+    if (view.installed_loading) l.store_state = caption(l10n::Get(I::StoreInstalledLoading));
+    else if (!view.installed_error.empty()) l.store_state = caption(l10n::Get(I::StoreInstalledFailed));
+    if (!view.installed_error.empty()) l.store_notice = caption(view.installed_error,12*s);
+    if (view.pending_restart) l.store_restart = caption(l10n::Get(I::StoreRestart),12*s);
+    if (view.installed.empty() && !view.installed_loading && view.installed_error.empty()) {
+        l.store_empty = caption(l10n::Get(I::StoreInstalledEmpty),16*s);
+    }
+    for (const auto& item : view.installed) {
+        SettingsLayout::InstalledCard c;
+        const float tl = left+16*s, tr = right-16*s, tw = tr-tl;
+        float cy = y+16*s;
+        auto field = [&](std::wstring_view value) {
+            const auto r = D2D1::RectF(tl,cy,tr,cy+height(value,tw));
+            cy = r.bottom+(value.empty()?0:8*s); return r;
+        };
+        c.name = field(item.name);
+        c.id = field(item.id);
+        c.publisher = field(item.publisher);
+        c.version = field(item.version);
+        // Badges have their own matching single-line measurement and drawing path.
+        const auto& badge = store_text::InstalledBadge(item);
+        const float bw = (std::min)(tw,painter ? painter->MeasureBadgeWidth(badge) : 120*s*font);
+        c.badge = D2D1::RectF(tl,cy,tl+bw,cy+24*s*font); cy = c.badge.bottom+8*s;
+        if (item.native_code) c.native_code = field(l10n::Get(I::StoreNativeCode));
+        c.status = field(item.status);
+        c.notice = field(item.notice);
+        cy += 4*s;
+        // Actions flow below the text and wrap independently; disabled actions remain visible.
+        float ax = tl;
+        auto action = [&](std::wstring_view label) {
+            const float aw = (std::min)(tw,width(label));
+            if (ax > tl && ax+aw > tr) { ax=tl; cy+=bh+8*s; }
+            const auto r = D2D1::RectF(ax,cy,ax+aw,cy+bh); ax=r.right+8*s; return r;
+        };
+        if (item.enabled) c.disable = action(l10n::Get(I::ExtensionPackageDisable));
+        else c.enable = action(l10n::Get(I::ExtensionPackageEnable));
+        c.uninstall = action(l10n::Get(I::StoreUninstall));
+        c.rollback = action(l10n::Get(I::StoreRollback));
+        c.bounds = D2D1::RectF(left,y,right,cy+bh+16*s);
+        l.installed_items.push_back(c);
+        y=c.bounds.bottom+12*s;
+    }
+    return y+24*s;
+}
+
+inline int HitTestSettingsStore(const SettingsLayout& l, const WindowViewModel& vm, float x, float y) {
+    if (vm.settings_page != 8) return -1;
+    const auto ContainsPt = [](D2D1_RECT_F r,float px,float py) {
+        return r.right>r.left && r.bottom>r.top && px>=r.left && px<r.right && py>=r.top && py<r.bottom;
+    };
+    if (ContainsPt(l.store_tabs[0],x,y)) return static_cast<int>(PackAction::StoreBrowse);
+    if (ContainsPt(l.store_tabs[1],x,y)) return static_cast<int>(PackAction::StoreInstalled);
+    if (ContainsPt(l.store_tabs[2],x,y)) return static_cast<int>(PackAction::StoreManage);
+    const auto& view=vm.settings_store_view;
+    if (!vm.settings_store_browse && vm.settings_store_installed) {
+        if (store_text::CanRefreshInstalled(view) && ContainsPt(l.store_refresh,x,y)) return static_cast<int>(PackAction::InstalledRefresh);
+        if (view.installed_busy) return -1;
+        for (size_t i=0;i<l.installed_items.size() && i<view.installed.size() && i<10000;++i) {
+            const auto& c=l.installed_items[i]; const auto& item=view.installed[i];
+            const int index=static_cast<int>(i);
+            if (!item.enabled && item.can_enable && ContainsPt(c.enable,x,y)) return static_cast<int>(PackAction::InstalledEnableBase)+index;
+            if (item.enabled && item.can_disable && ContainsPt(c.disable,x,y)) return static_cast<int>(PackAction::InstalledDisableBase)+index;
+            if (item.can_uninstall && ContainsPt(c.uninstall,x,y)) return static_cast<int>(PackAction::InstalledUninstallBase)+index;
+            if (item.can_rollback && ContainsPt(c.rollback,x,y)) return static_cast<int>(PackAction::InstalledRollbackBase)+index;
+        }
+        return -1;
+    }
+    if (!vm.settings_store_browse) return -1;
+    if (ContainsPt(l.store_manage,x,y)) return static_cast<int>(PackAction::StoreManage);
+    if (store_text::CanRefresh(view) && ContainsPt(l.store_refresh,x,y)) return static_cast<int>(PackAction::StoreRefresh);
+    if (view.busy && ContainsPt(l.store_cancel,x,y)) return static_cast<int>(PackAction::StoreCancel);
+    for (size_t i=0;i<l.store_items.size() && i<view.items.size();++i)
+        if (view.items[i].action_enabled && !view.items[i].button_label.empty() && ContainsPt(l.store_items[i].button,x,y))
+            return static_cast<int>(PackAction::StoreItemBase)+static_cast<int>(i);
+    return -1;
+}
+
+float LayoutSettingsPacks(SettingsLayout& l, const WindowViewModel& vm, float scale,
+                          float y, const fluent::Painter* painter) {
+    const float left = l.content.left + 20*scale, right = l.content.right - 20*scale;
+    auto row = [&](float h) { auto r = D2D1::RectF(left, y, right, y + h*scale); y = r.bottom; return r; };
+    auto button_w = [&](std::wstring_view text) { return painter ? painter->MeasureButtonWidth(text) : 96*scale; };
+    auto caption_h = [&](std::wstring_view text, float width) {
+        return text.empty() ? 0.0f : painter
+            ? painter->MeasureWrappedCaptionHeight(text, (std::max)(40*scale, width)) : 40*scale;
+    };
+    const float font = static_cast<float>(vm.settings_ui_font_scale) / 100.0f;
+    const float open_w = button_w(pack_text::OpenFolder());
+    // 快速预览 (page 5): how previews open and which formats they cover, then a
+    // card leading to the 增强包 page (8), which holds the packs themselves.
+    if (vm.settings_page != 8) {
+    y += caption_h(pack_text::Intro(), right - left) + 10*scale;
+    // 预览方式: one card per choice row, segments at the right (below when narrow).
+    {
+        const bool narrow = right - left < 560*scale;
+        auto segments = [&](D2D1_RECT_F r, D2D1_RECT_F* output, int count, float width, bool stack = false) {
+            const auto c = D2D1::RectF(narrow || stack ? r.left + 16*scale : r.right - (width + 16)*scale,
+                r.bottom - 44*scale, r.right - 16*scale, r.bottom - 12*scale);
+            const float w = (c.right - c.left) / static_cast<float>(count);
+            for (int i = 0; i < count; ++i)
+                output[i] = D2D1::RectF(c.left + w*static_cast<float>(i), c.top, c.left + w*static_cast<float>(i + 1), c.bottom);
+        };
+        const float h = narrow ? 112.0f : 64.0f + 8.0f*(font - 1.0f)*4.0f;
+        l.trigger_section = row(28*font);
+        l.trigger_row = row(h);
+        segments(l.trigger_row, l.trigger_choice, 2, 220*font);
+        if (vm.settings_preview_trigger == 0) {
+            y += 8*scale;
+            l.hover_delay_row = row(h);
+            // 连续滑条 (0-5000 ms): three segment cells hold the track, the last
+            // cell's right edge leaves room for the value label.
+            segments(l.hover_delay_row, l.hover_delay_slider_cells, 3, 240*font);
+            const auto g = SettingsSlider(l.hover_delay_slider_cells, scale);
+            l.hover_delay_slider_row = D2D1::RectF(g.left - 9*scale, l.hover_delay_row.top,
+                                                   g.right + 54*scale, l.hover_delay_row.bottom);
+            y += 8*scale;
+            l.hover_size_row = row(h);
+            segments(l.hover_size_row, l.hover_size_choice, 4, 300*font);
+        }
+        y += 8*scale;
+        l.hold_row = row(h);
+        segments(l.hold_row, l.hold_choice, 4, 300*font);
+        y += 24*scale;
+        // 预览窗口: five sizes need more room before they sit beside the text.
+        const bool stack_sizes = right - left < 820*scale;
+        l.window_section = row(28*font);
+        l.preview_size_row = row(narrow || stack_sizes ? 112.0f : h);
+        segments(l.preview_size_row, l.preview_size_choice, 5, 420*font, stack_sizes);
+        y += 8*scale;
+        l.preview_remember_row = row((caption_h(pack_text::RememberDesc(), right - left - 126*scale) + 47*scale) / scale);
+        y += 8*scale;
+        l.space_row = row(h);
+        segments(l.space_row, l.space_choice, 2, 260*font);
+        y += 8*scale;
+        l.loop_row = row(h);
+        segments(l.loop_row, l.loop_choice, 3, 320*font);
+        y += 24*scale;
+    }
+    l.preview_section = row(28*font);
+    const float header_top = y;
+    l.preview_header_title = D2D1::RectF(left + 54*scale, y + 12*scale, right - 48*scale, y + (12 + 26*font)*scale);
+    l.preview_header_summary = D2D1::RectF(left + 54*scale, l.preview_header_title.bottom, right - 48*scale,
+        l.preview_header_title.bottom + caption_h(pack_text::FormatsSummary(vm), right - left - 102*scale));
+    y = l.preview_header_summary.bottom + 12*scale;
+    l.disclosure[2] = D2D1::RectF(left, header_top, right, y);
+    if (vm.settings_expanded & 4u) {
+        l.preview_legend = D2D1::RectF(left + 54*scale, y + 4*scale, right - 16*scale, y + 4*scale);
+        float legend_x = l.preview_legend.left, legend_y = l.preview_legend.top;
+        for (int i = 0; i < 3; ++i) {
+            const float width = painter ? painter->MeasureBadgeWidth(pack_text::Legend(i)) : (i == 2 ? 180 : 100)*scale;
+            if (legend_x > l.preview_legend.left && legend_x + width > l.preview_legend.right) {
+                legend_x = l.preview_legend.left; legend_y += 30*font*scale;
+            }
+            l.preview_legend_chip[i] = D2D1::RectF(legend_x, legend_y, (std::min)(legend_x + width, l.preview_legend.right), legend_y + 24*font*scale);
+            legend_x += width + 10*scale;
+        }
+        const bool inline_note = l.preview_legend.right - legend_x > 250*font*scale;
+        const float note_left = inline_note ? legend_x + 6*scale : l.preview_legend.left;
+        const float note_top = inline_note ? legend_y + 2*scale : legend_y + 32*font*scale;
+        l.preview_legend_note = D2D1::RectF(note_left, note_top, right - 16*scale,
+            note_top + caption_h(pack_text::LegendNote(), right - 16*scale - note_left));
+        y = (std::max)(legend_y + 24*font*scale, l.preview_legend_note.bottom) + 14*scale;
+        l.preview_legend.bottom = y;
+        l.preview_formats = D2D1::RectF(left, y, right, y);
+        y += LayoutPreviewFormats(l.preview_formats, scale, nullptr, nullptr, caption_h);
+        l.preview_formats.bottom = y;
+    }
+    l.preview_group = D2D1::RectF(left, header_top, right, y);
+    y += 24*scale; l.preview_codec_section = row(28*font);
+    const float codecs_top = y;
+    const bool stacked_codecs = right - left < 620*font*scale;
+    for (int i = 0; i < kPreviewCodecCount; ++i) {
+        const auto info = PreviewCodec(i);
+        const bool detected = (vm.settings_preview_codecs & kPreviewCodecsDetected) != 0;
+        const bool has = (vm.settings_preview_codecs & (1u << i)) != 0;
+        const bool button = detected && !has && info.store_id;
+        const auto status = !detected ? l10n::Get(l10n::StringId::Checking).c_str() : has
+            ? l10n::Get(l10n::StringId::Installed).c_str() : l10n::Get(l10n::StringId::NotInstalled).c_str();
+        const float badge_w = painter ? painter->MeasureBadgeWidth(status) : 110*scale;
+        const float bw = button ? button_w(l10n::Get(l10n::StringId::Get).c_str()) : 0;
+        const float text_right = stacked_codecs ? right - 16*scale : right - 28*scale - badge_w - (button ? bw + 10*scale : 0);
+        const float desc_h = caption_h(info.description, text_right - left - 54*scale);
+        const float text_h = 14*scale + 26*font*scale + desc_h;
+        const float row_h = (std::max)(64*scale, text_h + (stacked_codecs ? 46 : 12)*scale);
+        l.preview_codec_row[i] = row(row_h / scale);
+        const auto r = l.preview_codec_row[i];
+        l.preview_codec_text[i] = D2D1::RectF(left + 54*scale, r.top + 10*scale, text_right, r.top + text_h);
+        const float controls_y = stacked_codecs ? r.bottom - 42*scale : (r.top + r.bottom - 32*scale)/2;
+        if (button) l.preview_codec_button[i] = D2D1::RectF(right - 16*scale - bw, controls_y, right - 16*scale, controls_y + 32*scale);
+        const float badge_right = button ? l.preview_codec_button[i].left - 10*scale : right - 16*scale;
+        l.preview_codec_badge[i] = D2D1::RectF(badge_right - badge_w, controls_y + (32 - 24*font)*scale/2,
+                                            badge_right, controls_y + (32 + 24*font)*scale/2);
+    }
+    l.preview_codec_hint = D2D1::RectF(left + 16*scale, y + 12*scale, right - 16*scale,
+        y + 12*scale + caption_h(pack_text::SystemHint(vm), right - left - 32*scale));
+    y = l.preview_codec_hint.bottom + 14*scale;
+    l.preview_codec_group = D2D1::RectF(left, codecs_top, right, y);
+    y += 30*scale; l.pack_section = row(32*font);
+    {
+        const bool compact = right - left < 560*font*scale;
+        l.pack_summary = row(compact ? 116.0f : 76.0f);
+        const float manage_w = button_w(pack_text::ManagePacks());
+        l.pack_manage = D2D1::RectF(right - 16*scale - manage_w, l.pack_summary.bottom - 48*scale,
+                                    right - 16*scale, l.pack_summary.bottom - 16*scale);
+    }
+    return y + 24*scale;
+    }
+    y += caption_h(vm.settings_store_browse ? l10n::Get(l10n::StringId::StoreIntro).c_str()
+        : vm.settings_store_installed ? store_text::InstalledIntro().c_str() : pack_text::PacksIntro(), right - left) + 18*scale;
+    // Measure labels, not equal thirds: long localized labels wrap the tab row.
+    const float tab_h = 36*font*scale;
+    float tab_x = left;
+    for (int i=0;i<3;++i) {
+        const float tab_w = (std::min)(right-left,painter ? painter->MeasureButtonWidth(store_text::Tab(i)) : 200*font*scale);
+        if (tab_x > left && tab_x+tab_w > right) { tab_x=left; y+=tab_h+8*scale; }
+        l.store_tabs[i]=D2D1::RectF(tab_x,y,tab_x+tab_w,y+tab_h);
+        tab_x+=tab_w+4*scale;
+    }
+    y += tab_h+18*scale;
+    if (vm.settings_store_browse) return LayoutSettingsStore(l,vm,scale,y,painter);
+    if (vm.settings_store_installed) return LayoutSettingsInstalled(l,vm,scale,y,painter);
+    l.pack_native_settings = row((std::max)(76.0f*scale, 49.0f*scale +
+        caption_h(l10n::Get(l10n::StringId::NativeExtensionSettingsIntro).c_str(), (std::max)(1.0f, right-left-126*scale))) / scale);
+    y += 8*scale;
+
+    // Summary: how many packs, their disk use and where they live; 全部更新
+    // left of 打开文件夹 while some pack has a newer release.
+    const bool compact_pack = right - left < 560*font*scale;
+    l.pack_summary = row(compact_pack ? 116.0f : 76.0f);
+    l.pack_open = D2D1::RectF(right - 16*scale - open_w, l.pack_summary.bottom - 48*scale,
+                              right - 16*scale, l.pack_summary.bottom - 16*scale);
+    if (vm.settings_pack_updates > 0) {
+        const float all_w = button_w(pack_text::UpdateAll(vm.settings_pack_updates));
+        l.pack_update_all = D2D1::RectF(l.pack_open.left - 8*scale - all_w, l.pack_open.top,
+                                        l.pack_open.left - 8*scale, l.pack_open.bottom);
+    }
+
+    // One pack card: icon, title + badge (+ switch), description, meta line
+    // with the primary button (and 更新到 left of it), and the last action's
+    // message.
+    const float text_left = left + 54*scale, inner_right = right - 16*scale;
+    struct CardRects { D2D1_RECT_F *card, *badge, *enable, *primary, *update, *notice; float* desc_h; };
+    auto card_layout = [&](const CardRects& out, bool shows_enable, const pack_text::Badge& badge,
+                           std::wstring_view desc, std::wstring_view primary, std::wstring_view update,
+                           const std::wstring& notice) {
+        const float top = y;
+        float badge_right = inner_right;
+        const float badge_top = top + (compact_pack ? 44*font : 19)*scale;
+        if (shows_enable) {
+            *out.enable = D2D1::RectF(inner_right - 42*scale, badge_top - 5*scale, inner_right, badge_top + 27*scale);
+            badge_right = out.enable->left - 12*scale;
+        }
+        const float badge_w = painter ? painter->MeasureBadgeWidth(badge.text) : 96*scale;
+        *out.badge = D2D1::RectF(badge_right - badge_w, badge_top, badge_right, badge_top + 24*font*scale);
+        *out.desc_h = caption_h(desc, inner_right - text_left);
+        const float desc_top = compact_pack ? out.badge->bottom + 12*scale : top + 40*scale;
+        const float footer = desc_top + *out.desc_h + 12*scale;
+        const float primary_w = primary.empty() ? 0.0f : button_w(primary);
+        *out.primary = primary.empty() ? D2D1::RectF(inner_right, footer, inner_right, footer + 32*scale)
+                                       : D2D1::RectF(inner_right - primary_w, footer, inner_right, footer + 32*scale);
+        if (!update.empty()) {
+            const float update_w = button_w(update);
+            *out.update = D2D1::RectF(out.primary->left - 8*scale - update_w, footer,
+                                      out.primary->left - 8*scale, footer + 32*scale);
+        }
+        float bottom = footer + 32*scale + 14*scale;
+        if (!notice.empty()) {
+            const float notice_h = caption_h(notice, inner_right - text_left - 12*scale);
+            *out.notice = D2D1::RectF(text_left - 8*scale, bottom - 4*scale, inner_right, bottom + notice_h + 12*scale);
+            bottom = out.notice->bottom + 12*scale;
+        }
+        *out.card = D2D1::RectF(left, top, right, bottom);
+        y = bottom;
+    };
+
+    // Media: the FFmpeg pack card.
+    y += 24*scale; l.pack_media_section = row(28);
+    card_layout({&l.pack_card, &l.pack_badge, &l.pack_enable, &l.pack_primary, &l.pack_update, &l.pack_notice,
+                 &l.pack_desc_h},
+                false, pack_text::MediaBadge(vm), pack_text::MediaDesc(),
+                pack_text::Primary(vm), pack_text::MediaUpdate(vm), pack_text::MediaNotice(vm));
+
+    // Optional existing FFmpeg is adjacent to the independently installable media pack.
+    y += 12*scale;
+    const float source_top = y;
+    const bool source_switch = pack_text::ShowsEnable(vm);
+    const float source_text_width = right - left - (source_switch ? 88 : 32)*scale;
+    l.pack_source_status = row((caption_h(pack_text::SourceStatus(vm), source_text_width) + 47*scale) / scale);
+    if (source_switch) {
+        const float cy = (l.pack_source_status.top + l.pack_source_status.bottom) * 0.5f;
+        l.pack_enable = D2D1::RectF(inner_right - 42*scale, cy - 16*scale, inner_right, cy + 16*scale);
+    }
+    l.pack_custom_row = row((caption_h(pack_text::CustomDesc(), right - left - 126*scale) + 47*scale) / scale);
+    if (pack_text::ShowsPath(vm)) {
+        l.pack_path_row = row(pack_text::ShowsDetect(vm) ? 110.0f : 90.0f);
+        const float browse_w = button_w(pack_text::Browse());
+        const float button_top = l.pack_path_row.bottom - 44*scale;
+        l.pack_browse = D2D1::RectF(inner_right - browse_w, button_top, inner_right, button_top + 32*scale);
+        if (pack_text::ShowsDetect(vm)) {
+            const float detect_w = button_w(pack_text::UseDetected());
+            l.pack_detect = D2D1::RectF(l.pack_browse.left - 8*scale - detect_w, button_top,
+                                        l.pack_browse.left - 8*scale, button_top + 32*scale);
+        }
+    }
+    l.pack_source_group = D2D1::RectF(left, source_top, right, y);
+
+    // Images: the image pack card.
+    y += 24*scale; l.pack_images_section = row(28);
+    card_layout({&l.pack_images_card, &l.pack_images_badge, &l.pack_images_enable, &l.pack_images_primary,
+                 &l.pack_images_update, &l.pack_images_notice, &l.pack_images_desc_h},
+                pack_text::ShowsImagesEnable(vm), pack_text::ImagesBadge(vm), pack_text::ImagesDesc(),
+                pack_text::ImagesPrimary(vm), pack_text::ImagesUpdate(vm), vm.settings_pack_images_notice);
+
+    // RAW camera photos card.
+    y += 12*scale;
+    card_layout({&l.pack_raw_card, &l.pack_raw_badge, &l.pack_raw_enable, &l.pack_raw_primary,
+                 &l.pack_raw_update, &l.pack_raw_notice, &l.pack_raw_desc_h},
+                pack_text::ShowsRawEnable(vm), pack_text::RawBadge(vm), pack_text::RawDesc(),
+                pack_text::RawPrimary(vm), pack_text::RawUpdate(vm), vm.settings_pack_raw_notice);
+
+
+    // 搜索: the 内容搜索 module (its index status as the notice) and OCR, planned.
+    y += 24*scale; l.pack_search_section = row(28);
+    card_layout({&l.pack_content_card, &l.pack_content_badge, &l.pack_content_enable, &l.pack_content_primary,
+                 &l.pack_content_update, &l.pack_content_notice, &l.pack_content_desc_h},
+                false, pack_text::ContentBadge(vm), pack_text::ContentDesc(), pack_text::ContentPrimary(vm), {},
+                pack_text::ContentReady(vm) ? vm.settings_content_status : std::wstring{});
+    y += 12*scale;
+    card_layout({&l.pack_ocr_card, &l.pack_ocr_badge, &l.pack_ocr_enable, &l.pack_ocr_primary,
+                 &l.pack_ocr_update, &l.pack_ocr_notice, &l.pack_ocr_desc_h},
+                false, pack_text::OcrBadge(), pack_text::OcrDesc(), pack_text::ComingSoon(), {}, std::wstring{});
+
+    // AI: the AI pack (MCP server; the assistant comes later).
+    y += 24*scale; l.pack_ai_section = row(28);
+    card_layout({&l.pack_ai_card, &l.pack_ai_badge, &l.pack_ai_enable, &l.pack_ai_primary,
+                 &l.pack_ai_update, &l.pack_ai_notice, &l.pack_ai_desc_h},
+                false, pack_text::AiBadge(vm), pack_text::AiDesc(), pack_text::AiPrimary(vm), {}, std::wstring{});
+
+    // Background updates and the uninstall choice remain separate from the media source.
+    y += 24*scale; l.pack_advanced_section = row(28);
+    const float group_top = y;
+    {
+        // 下载源: the drop-down at the right of its row.
+        const float choice_w = 220*scale;
+        l.pack_dl_row = row((caption_h(pack_text::DownloadSourceDesc(), right - left - 304*scale) + 47*scale) / scale);
+        const float cy = (l.pack_dl_row.top + l.pack_dl_row.bottom) * 0.5f;
+        l.pack_dl_choice = D2D1::RectF(right - 16*scale - choice_w, cy - 16*scale, right - 16*scale, cy + 16*scale);
+    }
+    l.pack_auto_update_row = row((caption_h(pack_text::AutoUpdateDesc(), right - left - 126*scale) + 47*scale) / scale);
+    l.pack_remove_row = row((caption_h(pack_text::RemoveDesc(), right - left - 126*scale) + 47*scale) / scale);
+    l.pack_group = D2D1::RectF(left, group_top, right, y);
+    {
+        // 测速: title, caption and the button, then a row per source.
+        y += 12*scale;
+        const float top = y;
+        const float bw = (std::max)(button_w(pack_text::SpeedTestButton(vm)), 88*scale);
+        const float header_h = caption_h(pack_text::SpeedTestDesc(), right - left - 84*scale - bw) + 47*scale;
+        l.pack_speed_button = D2D1::RectF(right - 16*scale - bw, top + 14*scale, right - 16*scale, top + 46*scale);
+        float ry = top + header_h + 4*scale;
+        for (auto& r : l.pack_speed_row) {
+            r = D2D1::RectF(left + 54*scale, ry, right - 16*scale, ry + 36*scale);
+            ry = r.bottom;
+        }
+        l.pack_speed_list = D2D1::RectF(left + 54*scale, top + header_h + 4*scale, right - 16*scale, ry);
+        y = ry + 16*scale;
+        l.pack_speed_card = D2D1::RectF(left, top, right, y);
+    }
+    y += 12*scale;
+    l.pack_note = D2D1::RectF(left, y, right, y + caption_h(pack_text::Note(), right - left - 8*scale) + 4*scale);
+    y = l.pack_note.bottom + 24*scale;
+    return y;
+}

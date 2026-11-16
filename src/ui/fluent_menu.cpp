@@ -1,0 +1,2726 @@
+#include "edit_host.h"
+#include "../common/localization.h"
+// fluent_menu.cpp — See fluent_menu.h for the contract.
+#include "fluent_menu.h"
+#include "anchored_popup_position.h"
+#include "window_layout_diagram.h"
+#include "FluentTokens.h"
+#include "lumatext_renderer.h"
+#include "typography.h"
+#include "window_material.h"
+#include "text_contrast_scope.h"
+
+#include <windowsx.h>
+#include <commctrl.h>
+#include <imm.h>
+#include <uxtheme.h>
+#include <wincodec.h>
+#include <d2d1effects.h>
+#pragma comment(lib, "dxguid.lib")
+#include <dwmapi.h>
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <cstring>
+#include <cwctype>
+#include <string_view>
+
+#pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "uxtheme.lib")
+#pragma comment(lib, "imm32.lib")
+#pragma comment(lib, "dwmapi.lib")
+
+namespace pulse::ui {
+
+namespace {
+
+constexpr UINT_PTR kAnimTimer = 1;
+constexpr wchar_t kMenuClass[] = L"PulseFluentMenu";
+
+// Menu surfaces use physical pixels on 96-DPI bitmaps. Their compositor may
+// belong to a logical-DIP window, including the global search popup.
+class MenuPixelDpiScope {
+public:
+    explicit MenuPixelDpiScope(ID2D1DeviceContext* dc) : dc_(dc) {
+        dc_->GetDpi(&x_, &y_);
+        dc_->SetDpi(96, 96);
+    }
+    ~MenuPixelDpiScope() { dc_->SetDpi(x_, y_); }
+private:
+    ID2D1DeviceContext* dc_;
+    float x_ = 96, y_ = 96;
+};
+
+float MeasureWidth(IDWriteFactory2* dwrite, IDWriteTextFormat* format,
+                   const std::wstring& text) {
+    if (!dwrite || !format || text.empty()) return 0.0f;
+    ComPtr<IDWriteTextLayout> layout;
+    dwrite->CreateTextLayout(text.c_str(), (UINT32)text.size(), format,
+                             10000.0f, 100.0f, &layout);
+    if (!layout.get()) return 0.0f;
+    DWRITE_TEXT_METRICS m{};
+    layout->GetMetrics(&m);
+    return (std::max)(m.width, m.widthIncludingTrailingWhitespace);
+}
+
+// Icon-button strips (glyph swatches) need wider slots and hit targets than
+// the tag color dots that share the quick_swatches mechanism.
+bool SwatchStripHasGlyphs(const FluentMenuItem& it) {
+    for (const auto& s : it.quick_swatches)
+        if (!s.glyph.empty()) return true;
+    return false;
+}
+
+bool HasLayoutTiles(const FluentMenuItem& it) {
+    return !it.quick_swatches.empty() && !it.quick_swatches.front().label.empty();
+}
+
+float SwatchSpacingDip(const FluentMenuItem& it) {
+    if (HasLayoutTiles(it)) return 94.0f;
+    return SwatchStripHasGlyphs(it) ? 44.0f : 28.0f;
+}
+
+float SwatchHitRadiusDip(const FluentMenuItem& it) {
+    if (HasLayoutTiles(it)) return 44.0f;
+    return SwatchStripHasGlyphs(it) ? 20.0f : 13.0f;
+}
+
+ComPtr<IDWriteTextFormat> MakeFormat(IDWriteFactory2* dwrite, float size) {
+    ComPtr<IDWriteTextFormat> fmt;
+    if (!dwrite) return fmt;
+    typography::CreateTextFormat(dwrite,
+        {typography::FontRole::Text, size, DWRITE_FONT_WEIGHT_NORMAL}, &fmt);
+    return fmt;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// FluentMenuModel
+// ---------------------------------------------------------------------------
+void FluentMenuModel::SetItems(std::vector<FluentMenuItem> items) {
+    items_ = std::move(items);
+}
+
+namespace {
+
+// The row of a visible flyout: same label, state and children (with IDs).
+bool SameFlyoutRow(const FluentMenuItem& a, const FluentMenuItem& b) {
+    if (a.text != b.text || a.enabled != b.enabled || a.children.size() != b.children.size())
+        return false;
+    for (size_t i = 0; i < a.children.size(); ++i) {
+        const auto& x = a.children[i];
+        const auto& y = b.children[i];
+        if (x.command != y.command || !SameFlyoutRow(x, y)) return false;
+    }
+    return true;
+}
+
+bool DisplayEqualItem(const FluentMenuItem& a, const FluentMenuItem& b) {
+    if (a.text != b.text || a.enabled != b.enabled ||
+        a.toggle != b.toggle || a.secondary != b.secondary || a.checked != b.checked ||
+        a.shortcut_inline != b.shortcut_inline || a.shortcut != b.shortcut ||
+        a.heading != b.heading || a.match_start != b.match_start ||
+        a.match_length != b.match_length || a.accent_glyph != b.accent_glyph ||
+        a.separator_after != b.separator_after || a.tooltip != b.tooltip ||
+        (a.trailing_command != 0) != (b.trailing_command != 0) ||
+        a.children.size() != b.children.size() ||
+        a.quick_swatches.size() != b.quick_swatches.size())
+        return false;
+    for (size_t i = 0; i < a.children.size(); ++i) {
+        if (!DisplayEqualItem(a.children[i], b.children[i])) return false;
+    }
+    return true;
+}
+
+void PatchItemCommands(FluentMenuItem& dest, const FluentMenuItem& src) {
+    dest.command = src.command;
+    dest.trailing_command = src.trailing_command;
+    dest.mnemonic = src.mnemonic;
+    // A predicted row gets its app icon when the live answer arrives; the
+    // icon does not move anything, so it is patched like the command.
+    if (src.icon) dest.icon = src.icon;
+    const size_t n = (std::min)(dest.children.size(), src.children.size());
+    for (size_t i = 0; i < n; ++i)
+        PatchItemCommands(dest.children[i], src.children[i]);
+    const size_t ns = (std::min)(dest.quick_swatches.size(), src.quick_swatches.size());
+    for (size_t i = 0; i < ns; ++i) {
+        dest.quick_swatches[i].command = src.quick_swatches[i].command;
+        dest.quick_swatches[i].mnemonic = src.quick_swatches[i].mnemonic;
+    }
+}
+
+wchar_t UpperKey(wchar_t key) {
+    return key ? static_cast<wchar_t>(std::towupper(key)) : 0;
+}
+
+} // namespace
+
+bool FluentMenuModel::PatchCommands(const std::vector<FluentMenuItem>& src) {
+    if (items_.size() != src.size()) return false;
+    for (size_t i = 0; i < items_.size(); ++i)
+        if (!DisplayEqualItem(items_[i], src[i])) return false;
+    for (size_t i = 0; i < items_.size(); ++i)
+        PatchItemCommands(items_[i], src[i]);
+    return true;
+}
+
+bool FluentMenuModel::PatchInPlace(std::vector<FluentMenuItem> src, IDWriteFactory2* dwrite) {
+    if (src.size() != items_.size()) return false;
+    for (size_t i = 0; i < src.size(); ++i)
+        if (src[i].separator_after != items_[i].separator_after ||
+            src[i].heading != items_[i].heading) return false;
+    const int height = height_;
+    items_ = std::move(src);
+    locked_width_ = width_;
+    Layout(dwrite, scale_, 0.0f);
+    locked_width_ = 0;
+    return height_ == height;
+}
+
+bool FluentMenuModel::PatchGrow(std::vector<FluentMenuItem> src, IDWriteFactory2* dwrite) {
+    const size_t shown = items_.size();
+    if (shown == 0 || src.size() <= shown) return false;
+    for (size_t i = 0; i < shown; ++i)
+        if (src[i].heading != items_[i].heading) return false;
+    for (size_t i = 0; i + 1 < shown; ++i)
+        if (src[i].separator_after != items_[i].separator_after) return false;
+    if (items_[shown - 1].separator_after && !src[shown - 1].separator_after) return false;
+    const float width = static_cast<float>(width_);
+    items_ = std::move(src);
+    Layout(dwrite, scale_, width);  // never narrower than shown
+    return true;
+}
+
+void FluentMenuModel::SetRowHeightDip(float dip) {
+    row_dip_ = std::clamp(dip, kMinRowDip, kMaxRowDip);
+}
+
+void FluentMenuModel::Layout(IDWriteFactory2* dwrite, float scale, float min_width_px) {
+    scale_ = std::max(0.25f, scale);
+    row_h_ = row_dip_ * scale_;  // theme.row_menu
+    pad_v_ = 4.0f * scale_;
+    sep_h_ = 5.0f * scale_;
+    heading_h_ = std::round(26.0f * scale_);
+
+    auto body = MakeFormat(dwrite, kLabelDip * scale_);
+    auto caption = MakeFormat(dwrite, 12.0f * scale_);
+
+    // Must match DrawMenuItem: inset 6, content pad 10, icon 16, gap 8, pad 10, inset 6.
+    const float inset = 6.0f * scale_;
+    const float content_pad = 10.0f * scale_;
+    const float icon_w = 16.0f * scale_;
+    const float icon_gap = 8.0f * scale_;
+    const float left_chrome = inset + content_pad + icon_w + icon_gap;
+    const float right_chrome = content_pad + inset;
+    const float shortcut_gap = 24.0f * scale_;
+
+    inline_label_width_ = 0.0f;
+    std::vector<float> row_w;
+    row_w.reserve(items_.size());
+    float content_w = 160.0f * scale_;
+    for (const auto& it : items_) {
+        const float radio_col = it.radio_group ? 12.0f * scale_ : 0.0f;
+        const float text_w = std::ceil(MeasureWidth(dwrite, body.get(), it.text) + 2.0f * scale_);
+        if (it.shortcut_inline && !it.shortcut.empty())
+            inline_label_width_ = std::max(inline_label_width_, text_w);
+        float w = radio_col + left_chrome + text_w + right_chrome;
+        if (it.trailing_command) w += 32.0f * scale_;
+        if (it.toggle) w += 52.0f * scale_;
+        if (!it.children.empty()) w += 26.0f * scale_; // 22px chevron column + 4px gap
+        if (it.children.empty() && !it.badge_text.empty()) {
+            w += shortcut_gap + MeasureWidth(dwrite, caption.get(), it.badge_text) + 14.0f * scale_;
+        } else if (!it.shortcut.empty()) {
+            // DrawMenuItem keeps >= 80dip for the label plus an 8dip gap before
+            // the shortcut column; reserve the same here, or a short label
+            // ("文件夹") makes the card too narrow and "Ctrl+Shift+N" ellipsizes.
+            // The 8dip slack covers LumaText ink running past the DWrite advance.
+            w += (std::max)(shortcut_gap, 88.0f * scale_ - text_w) +
+                 MeasureWidth(dwrite, caption.get(), it.shortcut) + 8.0f * scale_;
+        }
+        if (!it.quick_swatches.empty())
+            w = (std::max)(w, (32.0f + SwatchSpacingDip(it) *
+                               static_cast<float>(it.quick_swatches.size())) * scale_);
+        row_w.push_back(it.quick_swatches.empty() ? w : 0.0f);
+        content_w = (std::max)(content_w, w);
+    }
+    // Context menus stay compact; a long undo/file name ellipsizes instead of
+    // stretching the flyout. Command palette passes a larger min_width_px.
+    const float max_w = (std::max)(min_width_px, 320.0f * scale_);
+    width_ = locked_width_ > 0
+        ? locked_width_
+        : (int)std::ceil((std::max)(min_width_px, (std::min)(content_w, max_w)));
+    truncated_.assign(items_.size(), 0);
+    for (size_t i = 0; i < row_w.size(); ++i)
+        truncated_[i] = row_w[i] > static_cast<float>(width_) + 0.5f ? 1 : 0;
+
+    const float inline_space = std::max(0.0f, static_cast<float>(width_) -
+        left_chrome - right_chrome - shortcut_gap);
+    inline_label_width_ = std::min({inline_label_width_, 240.0f * scale_, inline_space * 0.4f});
+
+    float h = pad_v_ * 2.0f;
+    for (const auto& it : items_) {
+        h += HasLayoutTiles(it) ? 72.0f * scale_ : it.heading ? heading_h_ : row_h_;
+        if (it.separator_after) h += sep_h_;
+    }
+    height_ = (int)std::ceil(h);
+}
+
+const FluentMenuItem* FluentMenuModel::At(int i) const {
+    return (i >= 0 && i < (int)items_.size()) ? &items_[i] : nullptr;
+}
+
+bool FluentMenuModel::Truncated(int i) const {
+    return i >= 0 && i < (int)truncated_.size() && truncated_[static_cast<size_t>(i)] != 0;
+}
+
+float FluentMenuModel::RowHeightPx(int i) const {
+    const FluentMenuItem* it = At(i);
+    return it && HasLayoutTiles(*it) ? 72.0f * scale_ : it && it->heading ? heading_h_ : row_h_;
+}
+
+float FluentMenuModel::RowTopPx(int i) const {
+    float y = pad_v_;
+    for (int k = 0; k < i && k < (int)items_.size(); ++k) {
+        y += RowHeightPx(k);
+        if (items_[k].separator_after) y += sep_h_;
+    }
+    return y;
+}
+
+int FluentMenuModel::HitTestRow(float y_px) const {
+    float y = pad_v_;
+    for (int i = 0; i < (int)items_.size(); ++i) {
+        const float row = RowHeightPx(i);
+        if (y_px >= y && y_px < y + row) return items_[i].heading ? -1 : i;
+        y += row;
+        if (items_[i].separator_after) {
+            if (y_px >= y && y_px < y + sep_h_) return -1; // dead zone
+            y += sep_h_;
+        }
+    }
+    return -1;
+}
+
+wchar_t MenuItemMnemonic(const FluentMenuItem& item) {
+    if (item.mnemonic) return UpperKey(item.mnemonic);
+    // "编辑(E)" / "打开方式(H)...": shell32's CJK "(&X)" after CleanMenuText.
+    std::wstring_view text = item.text;
+    while (!text.empty() && (text.back() == L'.' || text.back() == L'\x2026' || text.back() == L' '))
+        text.remove_suffix(1);
+    if (text.size() < 3) return 0;
+    const wchar_t open = text[text.size() - 3];
+    const wchar_t key = text[text.size() - 2];
+    const wchar_t close = text.back();
+    if (!((open == L'(' && close == L')') || (open == L'\xFF08' && close == L'\xFF09'))) return 0;
+    const bool ascii_key = (key >= L'A' && key <= L'Z') || (key >= L'a' && key <= L'z') ||
+                           (key >= L'0' && key <= L'9');
+    return ascii_key ? UpperKey(key) : 0;
+}
+
+std::vector<MenuMnemonicTarget> FindMenuMnemonic(const std::vector<FluentMenuItem>& items,
+                                                 wchar_t key_a, wchar_t key_b) {
+    const wchar_t a = UpperKey(key_a);
+    const wchar_t b = UpperKey(key_b);
+    auto matches = [&](wchar_t key) { return key != 0 && (key == a || key == b); };
+    std::vector<MenuMnemonicTarget> out;
+    for (size_t i = 0; i < items.size(); ++i) {
+        const FluentMenuItem& item = items[i];
+        if (!item.enabled) continue;
+        if ((item.command != 0 || !item.children.empty()) && matches(MenuItemMnemonic(item)))
+            out.push_back({ static_cast<int>(i), -1 });
+        for (size_t s = 0; s < item.quick_swatches.size(); ++s) {
+            const FluentMenuSwatch& swatch = item.quick_swatches[s];
+            if (swatch.command != 0 && matches(UpperKey(swatch.mnemonic)))
+                out.push_back({ static_cast<int>(i), static_cast<int>(s) });
+        }
+    }
+    return out;
+}
+
+size_t NextMenuMnemonicTarget(const std::vector<MenuMnemonicTarget>& targets, int row,
+                              int swatch) {
+    for (size_t i = 0; i < targets.size(); ++i) {
+        if (targets[i].row > row || (targets[i].row == row && targets[i].swatch > swatch))
+            return i;
+    }
+    return 0;
+}
+
+int FluentMenuModel::NextEnabled(int from, int dir) const {
+    if (items_.empty()) return -1;
+    int n = (int)items_.size();
+    int i = from;
+    for (int step = 0; step < n; ++step) {
+        i += dir > 0 ? 1 : -1;
+        if (i < 0) i = n - 1;
+        if (i >= n) i = 0;
+        if (items_[i].enabled && !items_[i].heading) return i;
+    }
+    return -1;
+}
+
+// ---------------------------------------------------------------------------
+// FluentMenu window
+// ---------------------------------------------------------------------------
+FluentMenu::SubmenuState::~SubmenuState() {
+    if (hwnd) { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0); DestroyWindow(hwnd); }
+    if (surf.dib) DeleteObject(surf.dib);
+    if (surf.mem_dc) DeleteDC(surf.mem_dc);
+}
+
+FluentMenu::~FluentMenu() {
+    HideSubWindow();
+    sub_ = &first_sub_;
+    deeper_subs_.clear();
+    if (tooltip_) DestroyWindow(tooltip_);
+    HideFilterEdit();
+    if (edit_) {
+        filter_lead_.clear();
+        ApplyFilterLead();
+        DestroyWindow(edit_);
+        edit_ = nullptr;
+    }
+    if (edit_font_) { DeleteObject(edit_font_); edit_font_ = nullptr; }
+    if (edit_brush_) { DeleteObject(edit_brush_); edit_brush_ = nullptr; }
+    if (hwnd_) DestroyWindow(hwnd_);
+    if (surf_.dib) DeleteObject(surf_.dib);
+    if (surf_.mem_dc) DeleteDC(surf_.mem_dc);
+    if (tip_surf_.dib) DeleteObject(tip_surf_.dib);
+    if (tip_surf_.mem_dc) DeleteDC(tip_surf_.mem_dc);
+}
+
+bool FluentMenu::Create(HWND owner, Compositor* compositor, float scale) {
+    owner_ = owner;
+    compositor_ = compositor;
+    scale_ = scale;
+    painter_.SetCompositor(compositor);
+    painter_.SetScale(scale);
+    return EnsureWindow();
+}
+
+void FluentMenu::SetTheme(bool dark, D2D1_COLOR_F accent) {
+    dark_ = dark;
+    accent_ = accent;
+}
+
+void FluentMenu::SetRowHeightDip(float dip) {
+    model_.SetRowHeightDip(dip);
+    sub_->model.SetRowHeightDip(dip);
+}
+
+namespace {
+
+// Native menus take letters as access keys even while a Chinese or Japanese
+// IME is on: the IME never sees them, so no candidate window pops up behind
+// the menu. A command menu has nothing to type into, so for its lifetime the
+// input context is detached from the window keeping keyboard focus and from
+// the menu itself (a click focuses it), then handed back unchanged.
+class ImeSuspension {
+public:
+    ImeSuspension(HWND focus, HWND menu) : focus_(focus), menu_(menu) {
+        if (focus_ && focus_ != menu_) saved_ = ImmAssociateContext(focus_, nullptr);
+        if (menu_) ImmAssociateContextEx(menu_, nullptr, 0);
+    }
+    ~ImeSuspension() {
+        if (menu_ && IsWindow(menu_)) ImmAssociateContextEx(menu_, nullptr, IACE_DEFAULT);
+        if (focus_ && focus_ != menu_ && IsWindow(focus_)) ImmAssociateContext(focus_, saved_);
+    }
+    ImeSuspension(const ImeSuspension&) = delete;
+    ImeSuspension& operator=(const ImeSuspension&) = delete;
+
+private:
+    HWND focus_ = nullptr;
+    HWND menu_ = nullptr;
+    HIMC saved_ = nullptr;
+};
+
+} // namespace
+
+bool FluentMenu::EnsureWindow() {
+    if (hwnd_) return true;
+    HINSTANCE inst = GetModuleHandleW(nullptr);
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = MenuWndProc;
+    wc.hInstance = inst;
+    wc.lpszClassName = kMenuClass;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    if (!GetClassInfoExW(inst, kMenuClass, &wc)) RegisterClassExW(&wc);
+    hwnd_ = CreateWindowExW(WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                            kMenuClass, L"PulseMenu", WS_POPUP,
+                            0, 0, 10, 10, owner_, nullptr, inst, this);
+    return hwnd_ != nullptr;
+}
+
+LRESULT CALLBACK FluentMenu::MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* self = reinterpret_cast<FluentMenu*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (msg == WM_NCCREATE) {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        self = reinterpret_cast<FluentMenu*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+    }
+    if (!self) return DefWindowProcW(hwnd, msg, wParam, lParam);
+    SubmenuState* previous_sub = self->sub_;
+    struct RestoreSubmenu {
+        SubmenuState*& selected;
+        SubmenuState* previous;
+        ~RestoreSubmenu() { selected = previous; }
+    } restore{self->sub_, previous_sub};
+    self->sub_ = &self->first_sub_;
+    bool is_sub = hwnd == self->first_sub_.hwnd;
+    for (const auto& state : self->deeper_subs_) {
+        if (hwnd == state->hwnd) { self->sub_ = state.get(); is_sub = true; break; }
+    }
+    switch (msg) {
+    case WM_ACTIVATE:
+        if (self->activate_on_open_ && !is_sub && LOWORD(wParam) != WA_INACTIVE)
+            self->activation_confirmed_ = true;
+        break;
+    case WM_CANCELMODE:
+        if (self->activate_on_open_) {
+            self->result_ = 0;
+            self->open_ = false;
+        }
+        break;
+    case WM_MOUSEWHEEL:
+        if (!is_sub && self->Scrollable()) {
+            const int notches = GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA;
+            const int rows = notches != 0 ? -notches * 3
+                : (GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -1 : 1); // high-resolution wheels
+            if (self->ScrollRows(rows) && self->Render())
+                self->Present(self->present_alpha_, self->present_offset_);
+            return 0;
+        }
+        break;
+    case WM_MOUSEMOVE: {
+        POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (!is_sub && self->drag_row_ >= 0 && (wParam & MK_LBUTTON)) {
+            if (std::hypot(static_cast<float>(pt.x - self->drag_start_.x),
+                           static_cast<float>(pt.y - self->drag_start_.y)) >= 6.0f * self->scale_) {
+                self->dragged_command_ = self->model_.Items()[static_cast<size_t>(self->drag_row_)].drag_command;
+                self->drag_point_ = pt;
+                ClientToScreen(hwnd, &self->drag_point_);
+                self->drag_row_ = -1;
+                if (GetCapture() == hwnd) ReleaseCapture();
+                self->result_ = 0;
+                self->Dismiss();
+                return 0;
+            }
+        }
+        if (is_sub) {
+            self->OnSubMouse(pt, false);
+        } else if (self->bar_drag_) {
+            if (self->BarDrag(static_cast<float>(pt.y)) && self->Render())
+                self->Present(self->present_alpha_, self->present_offset_);
+        } else {
+            self->bar_hot_ = fluent::ScrollbarHitTest(self->BarSpec(),
+                static_cast<float>(pt.x), static_cast<float>(pt.y));
+            if (!self->bar_hot_) {
+                self->OnMouse(pt, false);
+            } else {
+                // The bar sits over the rows' right edge: no row under it.
+                self->sub_pending_row_ = -1;
+                self->UpdateTooltip(-1);
+                if (self->hover_row_ >= 0) self->UpdateHover(-1);
+            }
+        }
+        TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, hwnd, 0 };
+        TrackMouseEvent(&tme);
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        if (is_sub) {
+            if (self->sub_->hover != -1) {
+                self->sub_->hover = -1;
+                self->sub_->hover_swatch = -1;
+                if (self->RenderSub()) self->PresentSub(255);
+            }
+        } else {
+            // Keep the flyout: the pointer may be crossing onto it.
+            if (!self->bar_drag_) self->bar_hot_ = false;
+            self->UpdateHover(-1);
+        }
+        return 0;
+    case WM_LBUTTONDOWN:
+        if (!is_sub) {
+            self->OnMouse(POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)}, false);
+            if (self->hover_row_ >= 0 && self->model_.Items()[static_cast<size_t>(self->hover_row_)].drag_command) {
+                self->drag_row_ = self->hover_row_;
+                self->drag_start_ = POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+                SetCapture(hwnd);
+            }
+            SetFocus(self->external_edit_ ? self->external_edit_ : self->edit_ ? self->edit_ : hwnd);
+            if (self->BarPress(static_cast<float>(GET_X_LPARAM(lParam)), static_cast<float>(GET_Y_LPARAM(lParam)))) {
+                SetCapture(hwnd);
+                if (self->Render()) self->Present(self->present_alpha_, self->present_offset_);
+            }
+        }
+        return 0; // press visual is skipped; invoke happens on release
+    case WM_CAPTURECHANGED:
+        if (!is_sub && self->bar_drag_ && reinterpret_cast<HWND>(lParam) != hwnd) self->BarRelease();
+        break;
+    case WM_LBUTTONUP: {
+        self->drag_row_ = -1;
+        if (GetCapture() == hwnd && !self->bar_drag_) ReleaseCapture();
+        POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (!is_sub && self->bar_drag_) {
+            // A scrollbar drag ends here; it never invokes the row below.
+            self->BarRelease();
+            if (GetCapture() == hwnd) ReleaseCapture();
+            return 0;
+        }
+        if (is_sub) self->OnSubMouse(pt, true);
+        else self->OnMouse(pt, true);
+        return 0;
+    }
+    case WM_MOUSEACTIVATE:
+        if (self->external_edit_) return MA_NOACTIVATE;
+        if (self->filter_fn_) {
+            SetFocus(self->edit_ ? self->edit_ : hwnd);
+            return MA_ACTIVATE;
+        }
+        break;
+    case WM_CTLCOLOREDIT: {
+        const bool dark = self->dark_;
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(hdc, EditTextColor(dark));
+        SetBkColor(hdc, EditBackColor(dark));
+        if (!self->edit_brush_) {
+            self->edit_brush_ = CreateSolidBrush(dark ? RGB(30, 30, 30) : RGB(255, 255, 255));
+        }
+        return reinterpret_cast<LRESULT>(EditBackBrush(self->edit_brush_));
+    }
+    case WM_COMMAND:
+        if (HIWORD(wParam) == EN_CHANGE && self->edit_ &&
+            reinterpret_cast<HWND>(lParam) == self->edit_) {
+            self->SyncFilterFromEdit();
+            return 0;
+        }
+        break;
+    case WM_CHAR:
+        if (self->HandleFilterKey(msg, wParam)) return 0;
+        break;
+    case WM_GETDLGCODE:
+        if (self->filter_fn_) return DLGC_WANTCHARS | DLGC_WANTARROWS | DLGC_WANTALLKEYS;
+        break;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_APP:
+        if (self->open_ && !self->animating_out_) self->RefreshFilter();
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+float FluentMenu::BodyHeightPx() const {
+    if (overflow_) return body_limit_px_;
+    if (max_visible_rows_ <= 0) return static_cast<float>(model_.HeightPx());
+    return std::min(body_limit_px_ > 0 ? body_limit_px_ : static_cast<float>(model_.HeightPx()),
+        model_.RowTopPx(std::min(max_visible_rows_, model_.Count())) + 4.0f * scale_);
+}
+
+float FluentMenu::ViewportPx() const {
+    return std::max(0.0f, BodyHeightPx());
+}
+
+float FluentMenu::MaxScrollPx() const {
+    return std::max(0.0f, static_cast<float>(model_.HeightPx()) - ViewportPx());
+}
+
+void FluentMenu::ApplyHeightLimit(float available_px) {
+    overflow_ = false;
+    if (max_visible_rows_ > 0) {
+        body_limit_px_ = std::max(model_.RowHeightPx(), available_px);
+    } else if (static_cast<float>(model_.HeightPx()) > available_px) {
+        // Taller than the work area (#67): keep the card on screen and scroll
+        // the rows under the shared scrollbar.
+        overflow_ = true;
+        body_limit_px_ = std::max(available_px, model_.RowHeightPx());
+    } else {
+        body_limit_px_ = 0.0f;
+    }
+    scroll_y_ = std::clamp(scroll_y_, 0.0f, MaxScrollPx());
+}
+
+bool FluentMenu::ScrollTo(float y) {
+    const float clamped = std::clamp(y, 0.0f, MaxScrollPx());
+    if (std::abs(clamped - scroll_y_) < 0.01f) return false;
+    scroll_y_ = clamped;
+    // Rows moved under the pointer: drop the hover, its tooltip and a flyout
+    // that was anchored to a row which is somewhere else now.
+    if (sub_->parent_row >= 0) HideSubWindow();
+    hover_row_ = -1;
+    hover_swatch_ = -1;
+    UpdateTooltip(-1);
+    return true;
+}
+
+bool FluentMenu::ScrollRows(int rows) {
+    if (rows == 0 || model_.Count() == 0) return false;
+    // First row whose top is at or below the viewport top; a half-hidden row
+    // above it is the one a step up reveals.
+    // Scrolled rows sit flush with the top; only the very top keeps
+    // the menu's leading padding.
+    int first = model_.Count() - 1;
+    for (int i = 0; i < model_.Count(); ++i) {
+        if (model_.RowTopPx(i) >= scroll_y_ - 0.5f) {
+            first = i;
+            break;
+        }
+    }
+    const int target = std::clamp(first + rows, 0, model_.Count() - 1);
+    return ScrollTo(target == 0 ? 0.0f : model_.RowTopPx(target));
+}
+
+fluent::ScrollbarSpec FluentMenu::BarSpec() const {
+    fluent::ScrollbarSpec bar;
+    const float top = static_cast<float>(kShadowMargin) + FilterHeaderPx();
+    const float right = static_cast<float>(kShadowMargin + model_.WidthPx()) - 2.0f * scale_;
+    bar.viewport = D2D1::RectF(right - 12.0f * scale_, top + 4.0f * scale_,
+                               right, top + BodyHeightPx() - 4.0f * scale_);
+    bar.offset = scroll_y_;
+    bar.viewport_extent = ViewportPx();
+    bar.content_extent = static_cast<float>(model_.HeightPx());
+    bar.expand_progress = bar_fade_.Expand();
+    bar.opacity = bar_fade_.Opacity();
+    bar.enabled = Scrollable() && MaxScrollPx() > 0.0f;
+    return bar;
+}
+
+bool FluentMenu::BarPress(float x, float y) {
+    const fluent::ScrollbarSpec bar = BarSpec();
+    if (!fluent::ScrollbarHitTest(bar, x, y)) return false;
+    const D2D1_RECT_F thumb = fluent::ScrollbarThumbRect(bar, scale_);
+    bar_grab_ = fluent::ScrollbarGrabOffset(thumb.top, thumb.bottom - thumb.top, y);
+    bar_drag_ = true;
+    bar_hot_ = true;
+    sub_pending_row_ = -1;
+    UpdateTooltip(-1);
+    hover_row_ = -1;
+    BarDrag(y);   // a press on the track jumps the thumb there
+    return true;
+}
+
+bool FluentMenu::BarDrag(float y) {
+    if (!bar_drag_) return false;
+    const fluent::ScrollbarSpec bar = BarSpec();
+    const D2D1_RECT_F thumb = fluent::ScrollbarThumbRect(bar, scale_);
+    return ScrollTo(fluent::ScrollbarDragOffset(bar.viewport.top, bar.viewport.bottom - bar.viewport.top,
+                                                thumb.bottom - thumb.top, MaxScrollPx(), y, bar_grab_));
+}
+
+void FluentMenu::BarRelease() {
+    bar_drag_ = false;
+}
+
+bool FluentMenu::TickBar() {
+    const uint64_t now = ::pulse::ui::motion::NowMs();
+    bar_fade_.KeepVisible(true);
+    bar_fade_.SetHot(bar_hot_ || bar_drag_, now);
+    if (bar_fade_.Tick(now) && Render()) Present(present_alpha_, present_offset_);
+    return bar_fade_.Moving(now);
+}
+
+void FluentMenu::LayoutWindow(POINT screen_pt) {
+    int w = model_.WidthPx() + kShadowMargin * 2;
+    int h = static_cast<int>(std::ceil(BodyHeightPx())) + (int)FilterHeaderPx() + kShadowMargin * 2;
+
+    HMONITOR mon = MonitorFromPoint(screen_pt, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{ sizeof(mi) };
+    GetMonitorInfoW(mon, &mi);
+    ApplyHeightLimit(static_cast<float>(mi.rcWork.bottom - mi.rcWork.top - kShadowMargin * 2) -
+                     FilterHeaderPx());
+    h = static_cast<int>(std::ceil(BodyHeightPx())) + static_cast<int>(FilterHeaderPx()) + kShadowMargin * 2;
+    int x = screen_pt.x;
+    int y = screen_pt.y;
+    int natural_y = y; // where the menu sits when the work area has room
+    if (dropdown_) {
+        const int gap = static_cast<int>(std::lround(4 * scale_));
+        const RECT placement = AnchoredPopupPosition(dropdown_rect_, mi.rcWork, w, h,
+            kShadowMargin, gap, dropdown_above_);
+        x = placement.left;
+        y = placement.top;
+        natural_y = dropdown_rect_.bottom + gap - kShadowMargin;
+    } else if (anchor_to_rect_) {
+        x = anchor_rect_.left - kShadowMargin;
+        y = (external_edit_ ? anchor_rect_.bottom + static_cast<int>(4 * scale_) : anchor_rect_.top) - kShadowMargin;
+        natural_y = y;
+        if (x + w > mi.rcWork.right) x = (std::max)(mi.rcWork.left, mi.rcWork.right - w);
+        if (x < mi.rcWork.left) x = mi.rcWork.left;
+        if (y + h > mi.rcWork.bottom) y = std::max(mi.rcWork.top, mi.rcWork.bottom - h);
+    } else if (top_center_ && owner_) {
+        RECT wr{};
+        GetWindowRect(owner_, &wr);
+        x = wr.left + ((wr.right - wr.left) - w) / 2;
+        POINT top{ 0, static_cast<LONG>(std::lround(44.0f * scale_ + 4.0f * scale_)) };
+        ClientToScreen(owner_, &top);
+        y = top.y - kShadowMargin;
+        natural_y = y;
+        if (x + w > mi.rcWork.right) x = (std::max)(mi.rcWork.left, mi.rcWork.right - w);
+        if (x < mi.rcWork.left) x = mi.rcWork.left;
+        if (y + h > mi.rcWork.bottom) y = (std::max)(mi.rcWork.top, mi.rcWork.bottom - h);
+        if (y < mi.rcWork.top) y = mi.rcWork.top;
+    } else {
+        if (x + w > mi.rcWork.right) x = (std::max)(mi.rcWork.left, mi.rcWork.right - w);
+        if (x < mi.rcWork.left) x = mi.rcWork.left;
+        if (y + h > mi.rcWork.bottom) y = (std::max)(mi.rcWork.top, mi.rcWork.bottom - h);
+        if (y < mi.rcWork.top) y = mi.rcWork.top;
+    }
+    base_x_ = x;
+    base_y_ = y;
+    // Slide in from the anchor side: down from above normally, up from below
+    // when the menu had to flip or lift above its natural spot (screen
+    // bottom). Chosen at open; a re-layout while open keeps the direction.
+    if (!open_) slide_sign_ = y < natural_y ? 1 : -1;
+    LONG_PTR ex = GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
+    if (activate_on_open_ || (filter_fn_ && !external_edit_))
+        SetWindowLongPtrW(hwnd_, GWL_EXSTYLE, ex & ~WS_EX_NOACTIVATE);
+    else
+        SetWindowLongPtrW(hwnd_, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE);
+    // While open (late rows), stay where the running slide put the window;
+    // the next frame continues from there instead of jumping to rest.
+    // Opening: place and size only. The window is shown by Show() after its
+    // first frame is in the layered surface; showing here put whatever the
+    // previous popup last presented (often the settled, fully opaque menu)
+    // on screen for a compositor frame before the open animation began.
+    const UINT show = open_ ? SWP_SHOWWINDOW : 0;
+    SetWindowPos(hwnd_, topmost_ ? HWND_TOPMOST : HWND_TOP, x, open_ ? y + present_offset_ : y, w, h,
+                 (filter_fn_ && !external_edit_) ? show : (SWP_NOACTIVATE | show));
+}
+
+namespace {
+std::atomic<bool> g_menu_acrylic{false};
+}
+
+void FluentMenu::SetAcrylicEnabled(bool enabled) noexcept {
+    g_menu_acrylic.store(enabled, std::memory_order_relaxed);
+    Compositor::SetFrameCopyEnabled(enabled);
+}
+
+bool FluentMenu::AcrylicEnabled() noexcept {
+    return g_menu_acrylic.load(std::memory_order_relaxed);
+}
+
+bool FluentMenu::EnsurePlate(Surface& s, const D2D1_RECT_F& card, POINT origin,
+                             ID2D1Image* target) {
+    ID2D1DeviceContext* dc = compositor_ ? compositor_->Dc() : nullptr;
+    const int pw = static_cast<int>(std::ceil(card.right - card.left));
+    const int ph = static_cast<int>(std::ceil(card.bottom - card.top));
+    if (!dc || pw <= 0 || ph <= 0) return false;
+    const RECT key{ origin.x + static_cast<LONG>(std::floor(card.left)),
+                    origin.y + static_cast<LONG>(std::floor(card.top)), pw, ph };
+    if (s.plate.get() && EqualRect(&s.plate_key, &key) && s.plate_dark == dark_) return true;
+    s.plate.reset();
+
+    // The owner window must be on screen and under the card; a tray menu over
+    // the taskbar would otherwise blur a frame nobody can see.
+    ID2D1Bitmap1* frame = compositor_->FrameCopy();
+    const HWND host = compositor_->Hwnd();
+    if (!frame || !host || !IsWindowVisible(host) || IsIconic(host)) return false;
+    POINT client{ 0, 0 };
+    if (!ClientToScreen(host, &client)) return false;
+    // Clearer than the capsule recipe (0.96 / 0.85) so the window shows
+    // through; typography_policy_test keeps body text at 4.5:1 or better
+    // over white (dark menus) and black (light menus).
+    ComPtr<ID2D1Bitmap1> plate;
+    const bool ok = BuildAcrylicPlate(dc, frame, client, RECT{ key.left, key.top, key.left + pw, key.top + ph },
+                                      16.0f * scale_, dark_, dark_ ? 0.80f : 0.72f, dark_ ? 0.20f : 0.05f, plate);
+    dc->SetTarget(target);
+    if (!ok) return false;
+    s.plate = std::move(plate);
+    s.plate_key = key;
+    s.plate_dark = dark_;
+    return true;
+}
+
+ID2D1Bitmap* FluentMenu::IconBitmapFor(const common::MenuIconRef& pixels,
+                                       ID2D1DeviceContext* dc) {
+    if (!pixels || !pixels->Valid() || !dc) return nullptr;
+    for (const auto& entry : icon_bitmaps_)
+        if (entry.pixels == pixels) return entry.bitmap.get();
+    IconBitmap entry;
+    entry.pixels = pixels;
+    const auto props = D2D1::BitmapProperties(
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+    if (FAILED(dc->CreateBitmap(D2D1::SizeU(pixels->width, pixels->height), pixels->bgra.data(),
+                                pixels->width * 4u, props, &entry.bitmap)))
+        entry.bitmap.reset();  // remembered as missing: no retry every frame
+    icon_bitmaps_.push_back(std::move(entry));
+    return icon_bitmaps_.back().bitmap.get();
+}
+
+bool FluentMenu::Render() {
+    // While the flyout is open its header row stays visually active even if
+    // the pointer moved into the flyout window.
+    const int hov = hover_row_ >= 0 ? hover_row_ : first_sub_.parent_row;
+    return RenderSurface(model_, hov, hover_swatch_, FilterHeaderPx(),
+                         filter_fn_ != nullptr, surf_);
+}
+
+bool FluentMenu::RenderSub() {
+    const size_t depth = SubmenuDepth();
+    const SubmenuState* child = depth < deeper_subs_.size() ? deeper_subs_[depth].get() : nullptr;
+    const int hover = sub_->hover >= 0 ? sub_->hover : child ? child->parent_row : -1;
+    return RenderSurface(sub_->model, hover, sub_->hover_swatch, 0.0f, false, sub_->surf);
+}
+
+bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int hover_swatch,
+                               float header_px, bool draw_filter_field, Surface& s) {
+    ID2D1DeviceContext* dc = compositor_ ? compositor_->Dc() : nullptr;
+    if (!dc || model.Count() == 0) return false;
+    const MenuPixelDpiScope pixel_dpi(dc);
+
+    const int cw = model.WidthPx();
+    const int header = (int)header_px;
+    const bool main = &model == &model_;
+    const int body = main ? static_cast<int>(std::ceil(BodyHeightPx())) : model.HeightPx();
+    const int ch = body + header;
+    const int w = cw + kShadowMargin * 2;
+    const int h = ch + kShadowMargin * 2;
+
+    D2D1_SIZE_U size{ (UINT32)w, (UINT32)h };
+    auto props = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.0f, 96.0f);
+    if (s.dc_key != dc || s.tw != w || s.th != h) {
+        s.target.reset();
+        s.scaled.reset();
+        s.readback.reset();
+        s.dc_key = dc;
+        s.tw = w;
+        s.th = h;
+    }
+    if (!s.target.get() && FAILED(dc->CreateBitmap(size, nullptr, 0, props, &s.target))) return false;
+    ID2D1Bitmap1* bmp = s.target.get();
+
+    // Open / close transition of the main card (pulse_motion_v2 tokens).
+    const bool animate_open = main && motion_ && open_t_ms_ >= 0.0f && !animating_out_;
+    float card_scale = 1.0f;
+    // newmenu: the card is revealed through a rounded mask that morphs from
+    // the button's pill to the full card; the rows wait for the container.
+    const bool morphing = animate_open && morph_;
+    float morph_p = 1.0f;
+    if (main && motion_) {
+        if (animating_out_) card_scale = 1.0f - 0.03f * close_k_;
+        else if (morphing)
+            morph_p = ::pulse::ui::motion::SpringProgress(::pulse::ui::motion::spring::Open, open_t_ms_);
+        else if (open_t_ms_ >= 0.0f)
+            card_scale = 0.94f + 0.06f * ::pulse::ui::motion::SpringProgress(::pulse::ui::motion::spring::Pop, open_t_ms_);
+    }
+    auto row_alpha = [&](int row) {
+        if (!animate_open) return 1.0f;
+        const float delay = (morphing ? 110.0f : 20.0f) + 9.0f * static_cast<float>((std::min)(row, 8));
+        return ::pulse::ui::motion::EaseOutCubic((open_t_ms_ - delay) / 120.0f);
+    };
+
+    ComPtr<ID2D1Image> old_target;
+    dc->GetTarget(&old_target);
+    dc->SetTarget(bmp);
+    // Match the main compositor: grayscale text AA. Default ClearType writes
+    // subpixel RGB coverage that survives premultiplied readback as ghosted
+    // glyphs (worst on CJK) once composited by UpdateLayeredWindow.
+    const D2D1_TEXT_ANTIALIAS_MODE old_text_aa = dc->GetTextAntialiasMode();
+    dc->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    const bool high_contrast = IsHighContrast();
+    const TextContrastScope text_contrast_scope(high_contrast);
+    dc->BeginDraw();
+    dc->Clear(D2D1::ColorF(0, 0, 0, 0));
+
+    const auto card = D2D1::RectF((float)kShadowMargin, (float)kShadowMargin,
+                                  (float)(kShadowMargin + cw), (float)(kShadowMargin + ch));
+    const auto drop = (anchor_to_rect_ && header > 0)
+        ? D2D1::RectF(card.left, card.top + (float)header, card.right, card.bottom)
+        : card;
+    Theme theme = high_contrast ? MakeHighContrastTheme() : MakeTheme(dark_, accent_);
+    const float radius = theme.radius_flyout * scale_;
+
+    bool plate = false;
+    if (acrylic_active_ && !high_contrast && drop.right > drop.left && drop.bottom > drop.top) {
+        const POINT origin = main ? POINT{ base_x_, base_y_ } : POINT{ sub_->x, sub_->y };
+        plate = EnsurePlate(s, drop, origin, bmp);
+        ComPtr<ID2D1Factory> factory;
+        dc->GetFactory(&factory);
+        ComPtr<ID2D1RoundedRectangleGeometry> shape;
+        if (plate && factory.get() &&
+            SUCCEEDED(factory->CreateRoundedRectangleGeometry(
+                D2D1::RoundedRect(drop, radius, radius), &shape))) {
+            dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), shape.get(),
+                                                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE), nullptr);
+            dc->DrawImage(s.plate.get(), D2D1::Point2F(std::floor(drop.left), std::floor(drop.top)));
+            dc->PopLayer();
+        } else {
+            plate = false;
+        }
+    }
+
+    if (painter_.BeginFrame(theme, high_contrast)) {
+        if (drop.right > drop.left && drop.bottom > drop.top)
+            painter_.DrawMenuSurface(drop, plate);
+        if (anchor_to_rect_ && header > 0) {
+            fluent::ControlState bar;
+            bar.focused = true;
+            painter_.DrawTextFieldFrame(
+                D2D1::RectF(card.left, card.top, card.right, card.top + (float)header), bar);
+        }
+        float y = (float)kShadowMargin;
+        if (header > 0 && draw_filter_field && !anchor_to_rect_) {
+            fluent::TextFieldSpec field;
+            field.bounds = D2D1::RectF(card.left + 8.0f * scale_, card.top + 6.0f * scale_,
+                                       card.right - 8.0f * scale_, card.top + (float)header - 4.0f * scale_);
+            field.placeholder = filter_placeholder_.empty()
+                ? pulse::l10n::Get(pulse::l10n::StringId::TabMenuSearch) : filter_placeholder_;
+            field.text = filter_query_;
+            field.leading_glyph = L"\xE721";
+            field.state.focused = true;
+            field.suppress_text = edit_ != nullptr;
+            painter_.DrawTextField(field);
+        }
+        if (header > 0) y += (float)header;
+        dc->PushAxisAlignedClip(D2D1::RectF(static_cast<float>(kShadowMargin), y,
+            static_cast<float>(kShadowMargin + cw), y + body), D2D1_ANTIALIAS_MODE_ALIASED);
+        // Hover plate: one rounded rect that glides between rows (Plate
+        // spring) instead of each row lighting up on its own. High contrast
+        // keeps the per-row system highlight.
+        const bool glide = !high_contrast;
+        int plate_row = -1;
+        if (glide && hover_row >= 0) {
+            const FluentMenuItem* hv = model.At(hover_row);
+            if (hv && hv->enabled && !hv->heading && hv->quick_swatches.empty()) plate_row = hover_row;
+        }
+        {
+            ::pulse::ui::motion::SpringRectMotion& pm = main ? plate_ : sub_->plate;
+            uint64_t& pf = main ? plate_frame_ : sub_->plate_frame;
+            if (plate_row >= 0) {
+                const float top = y + model.RowTopPx(plate_row) - (main ? scroll_y_ : 0.0f);
+                float right = static_cast<float>(kShadowMargin + cw) - 6.0f * scale_;
+                if (model.At(plate_row)->trailing_command) right -= 32.0f * scale_;
+                const D2D1_RECT_F target = D2D1::RectF(static_cast<float>(kShadowMargin) + 6.0f * scale_,
+                    top + 2.0f * scale_, right, top + model.RowHeightPx(plate_row) - 2.0f * scale_);
+                const uint64_t ctx = main ? plate_context_
+                    : plate_context_ * 1315423911ull + static_cast<uint64_t>(sub_->parent_row + 2);
+                const D2D1_RECT_F r = pm.Update(ctx, plate_row, target, ++pf, ::pulse::ui::motion::NowMs(), ::pulse::ui::motion::spring::Plate);
+                D2D1_COLOR_F fill = dark_ ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.08f)
+                                          : D2D1::ColorF(0.0f, 0.0f, 0.0f, 9.0f / 255.0f);
+                fill.a *= (std::max)(0.0f, row_alpha(plate_row));
+                painter_.FillRoundedRect(r, 5.0f * scale_, fill);
+            } else {
+                pf += 2;
+                pm.Hide();
+            }
+        }
+        const float body_top = y;
+        y += model.RowTopPx(0) - (main ? scroll_y_ : 0.0f);
+        for (int i = 0; i < model.Count(); ++i) {
+            const FluentMenuItem* it = model.At(i);
+            // Rows scrolled wholly outside the clipped body are skipped.
+            if (main && max_visible_rows_ > 0 &&
+                (y + model.RowHeightPx(i) < body_top - 4.0f * scale_ || y > body_top + body + 4.0f * scale_)) {
+                y += model.RowHeightPx(i) + (it->separator_after ? 5.0f * scale_ : 0.0f);
+                continue;
+            }
+            // Rows follow the card in with a short stagger and a 4dip rise.
+            const float ra = row_alpha(i);
+            const bool layered = ra < 0.999f;
+            const float rise = layered ? (1.0f - (std::max)(0.0f, ra)) * 4.0f * scale_ : 0.0f;
+            if (layered)
+                dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), nullptr,
+                    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::IdentityMatrix(), (std::max)(0.0f, ra)), nullptr);
+            y += rise;
+            fluent::MenuItemSpec spec;
+            spec.bounds = D2D1::RectF((float)kShadowMargin, y,
+                                      (float)(kShadowMargin + cw), y + model.RowHeightPx(i));
+            spec.text = it->text;
+            spec.heading = it->heading;
+            spec.match_start = it->match_start;
+            spec.match_length = it->match_length;
+            spec.glyph = it->glyph;
+            spec.glyph_scale = it->glyph_scale;
+            spec.accent_glyph = it->accent_glyph;
+            spec.shortcut = it->shortcut;
+            spec.shortcut_inline = it->shortcut_inline;
+            spec.inline_label_width = model.InlineLabelWidthPx();
+            spec.badge_text = it->badge_text;
+            spec.has_submenu = !it->children.empty();
+            spec.state.enabled = it->enabled;
+            // A quick-swatch strip owns its hover feedback per dot; treating it
+            // as a regular menu row produces a misleading full-width highlight.
+            spec.state.hovered = (i == hover_row && !it->heading && it->quick_swatches.empty()) && !glide;
+            spec.separator_after = it->separator_after;
+            spec.has_swatch = it->has_swatch;
+            spec.checked = it->checked;
+            spec.toggle = it->toggle;
+            spec.secondary = it->secondary;
+            spec.mixed = it->mixed;
+            spec.radio = it->radio;
+            spec.radio_group = it->radio_group;
+            spec.pictogram = it->pictogram;
+            spec.swatch_color = it->swatch_color;
+            if (it->icon) spec.icon_bitmap = IconBitmapFor(it->icon, dc);
+            if (it->trailing_command) spec.bounds.right -= 32.0f * scale_;
+            painter_.DrawMenuItem(spec);
+            if (it->trailing_command && i == hover_row && it->enabled) {
+                const float right = static_cast<float>(kShadowMargin + cw) - 8.0f * scale_;
+                const float glyph_top = y + (model.RowHeightPx(i) - 20.0f * scale_) * 0.5f;
+                painter_.DrawGlyph(L"\xE711", D2D1::RectF(right - 20.0f * scale_,
+                    glyph_top, right, glyph_top + 20.0f * scale_), theme.text_secondary);
+            }
+            if (!it->quick_swatches.empty()) {
+                const float spacing = SwatchSpacingDip(*it) * scale_;
+                const float strip_width = spacing * static_cast<float>(it->quick_swatches.size() - 1);
+                const float first = static_cast<float>(kShadowMargin) +
+                    (static_cast<float>(cw) - strip_width) * 0.5f;
+                const float center_y = (spec.bounds.top + spec.bounds.bottom) * 0.5f;
+                for (size_t swatch_index = 0; swatch_index < it->quick_swatches.size(); ++swatch_index) {
+                    const auto& swatch = it->quick_swatches[swatch_index];
+                    const float center_x = first + spacing * static_cast<float>(swatch_index);
+                    const bool hovered = i == hover_row &&
+                                         static_cast<int>(swatch_index) == hover_swatch;
+                    if (!swatch.label.empty()) {
+                        const auto tile = D2D1::RectF(center_x - 43*scale_, center_y - 32*scale_, center_x + 43*scale_, center_y + 32*scale_);
+                        if (hovered) {
+                            painter_.FillRoundedRect(tile, 7*scale_, theme.fill_hover);
+                            painter_.StrokeRoundedRect(tile, 7*scale_, theme.stroke_card);
+                        }
+                        const auto ink = it->enabled ? theme.text : theme.text_disabled;
+                        using P=fluent::MenuPictogram;
+                        const int layout=swatch.pictogram==P::LayoutSideBySide?0:swatch.pictogram==P::LayoutStacked?1:
+                            swatch.pictogram==P::LayoutColumns?2:swatch.pictogram==P::LayoutFour?3:swatch.pictogram==P::LayoutThree?4:swatch.pictogram==P::LayoutCascade?5:
+                            swatch.pictogram==P::LayoutMainRight?6:swatch.pictogram==P::LayoutMainTop?7:8;
+                        ComPtr<ID2D1SolidColorBrush> diagram_brush; dc->CreateSolidColorBrush(ink,&diagram_brush);
+                        if (diagram_brush.get()) DrawWindowLayoutDiagram(dc,
+                            D2D1::RectF(center_x-29*scale_,tile.top+5*scale_,center_x+29*scale_,tile.top+41*scale_),
+                            layout,diagram_brush.get(),scale_,it->enabled ? theme.accent : theme.text_disabled,true);
+                        painter_.DrawText(swatch.label, D2D1::RectF(tile.left+2*scale_, tile.top+43*scale_, tile.right-2*scale_, tile.bottom), compositor_->SmallFormat(), ink, fluent::HorizontalAlignment::Center);
+                    } else if (!swatch.glyph.empty()) {
+                        // Icon button: hover pill + Fluent glyph in text color.
+                        const float half_w = 18.0f * scale_;
+                        const float half_h = 13.0f * scale_;
+                        const D2D1_RECT_F pill = D2D1::RectF(
+                            center_x - half_w, center_y - half_h,
+                            center_x + half_w, center_y + half_h);
+                        if (hovered && it->enabled)
+                            painter_.FillRoundedRect(pill, 4.0f * scale_, theme.fill_hover);
+                        const float g = 8.0f * scale_;
+                        painter_.DrawGlyph(swatch.glyph,
+                            D2D1::RectF(center_x - g, center_y - g, center_x + g, center_y + g),
+                            it->enabled ? theme.text : theme.text_disabled);
+                    } else if (swatch.custom_color) {
+                        painter_.DrawTagDotState(D2D1::Point2F(center_x, center_y), 6.0f,
+                            theme.text_secondary, false, false, hovered);
+                        const D2D1_COLOR_F colors[] = {
+                            HexColor(0xEF4444), HexColor(0xF59E0B), HexColor(0xEAB308),
+                            HexColor(0x22C55E), HexColor(0x3B82F6), HexColor(0xA855F7)};
+                        ComPtr<ID2D1SolidColorBrush> brush;
+                        if (SUCCEEDED(dc->CreateSolidColorBrush(colors[0], &brush))) {
+                            for (int part = 0; part < 24; ++part) {
+                                const float angle = static_cast<float>(part) * 6.2831853f / 24.0f;
+                                brush->SetColor(colors[part / 4]);
+                                dc->DrawLine(D2D1::Point2F(center_x, center_y),
+                                    D2D1::Point2F(center_x + std::cos(angle) * 5.0f * scale_,
+                                        center_y + std::sin(angle) * 5.0f * scale_), brush.get(), 2.0f * scale_);
+                            }
+                            brush->SetColor(D2D1::ColorF(D2D1::ColorF::White));
+                            dc->DrawLine(D2D1::Point2F(center_x - 2.5f * scale_, center_y),
+                                D2D1::Point2F(center_x + 2.5f * scale_, center_y), brush.get(), scale_);
+                            dc->DrawLine(D2D1::Point2F(center_x, center_y - 2.5f * scale_),
+                                D2D1::Point2F(center_x, center_y + 2.5f * scale_), brush.get(), scale_);
+                        }
+                    } else {
+                        // Quiet in the menu: smaller, softened toward the menu
+                        // surface; full colour only when checked, mixed or hovered.
+                        const D2D1_COLOR_F dot = swatch.checked || swatch.mixed || hovered ? swatch.color
+                            : MixColor(swatch.color, theme.surface_flyout, 0.4f);
+                        painter_.DrawTagDotState(D2D1::Point2F(center_x, center_y), 4.5f,
+                                                 dot, swatch.checked, swatch.mixed,
+                                                 hovered);
+                    }
+                }
+            }
+            y -= rise;
+            if (layered) dc->PopLayer();
+            y += model.RowHeightPx(i);
+            if (it->separator_after) y += 5.0f * scale_;
+        }
+        dc->PopAxisAlignedClip();
+        // The shared scrollbar, thin at rest, full width under the pointer.
+        if (main && Scrollable()) painter_.DrawScrollbar(BarSpec());
+    }
+
+    HRESULT hr = dc->EndDraw();
+    dc->SetTextAntialiasMode(old_text_aa);
+    dc->SetTarget(old_target.get());
+    if (FAILED(hr)) {
+        s.target.reset();
+        s.scaled.reset();
+        s.readback.reset();
+        return false;
+    }
+
+    // Grow / shrink: scale the finished card about the anchor point in a
+    // second pass, so painter code never sees a transform.
+    ID2D1Bitmap1* src_bmp = bmp;
+    if (morphing && morph_p < 0.999f) {
+        if (!s.scaled.get() && FAILED(dc->CreateBitmap(size, nullptr, 0, props, &s.scaled))) s.scaled.reset();
+        ComPtr<ID2D1Factory> factory;
+        dc->GetFactory(&factory);
+        if (s.scaled.get() && factory.get()) {
+            const float m = static_cast<float>(kShadowMargin);
+            const float fw = static_cast<float>(w), fh = static_cast<float>(h);
+            // Full card plus its shadow margin, reached as the spring lands.
+            const float grow = m * std::clamp(morph_p, 0.0f, 1.0f);
+            const D2D1_RECT_F to = D2D1::RectF(m - grow, m - grow, fw - m + grow, fh - m + grow);
+            auto lerp = [&](float a, float b) { return a + (b - a) * morph_p; };
+            const D2D1_RECT_F mask = D2D1::RectF(lerp(morph_from_.left, to.left), lerp(morph_from_.top, to.top),
+                                                 lerp(morph_from_.right, to.right), lerp(morph_from_.bottom, to.bottom));
+            const float r0 = (morph_from_.bottom - morph_from_.top) * 0.5f;
+            const float clip_r = (std::max)(0.0f, lerp(r0, 8.0f * scale_));
+            ComPtr<ID2D1RoundedRectangleGeometry> geo;
+            if (SUCCEEDED(factory->CreateRoundedRectangleGeometry(D2D1::RoundedRect(mask, clip_r, clip_r), &geo)) &&
+                geo.get()) {
+                dc->SetTarget(s.scaled.get());
+                dc->BeginDraw();
+                dc->Clear(D2D1::ColorF(0, 0, 0, 0));
+                dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), geo.get()), nullptr);
+                dc->DrawBitmap(bmp, D2D1::RectF(0.0f, 0.0f, fw, fh), 1.0f, D2D1_INTERPOLATION_MODE_LINEAR);
+                dc->PopLayer();
+                if (SUCCEEDED(dc->EndDraw())) src_bmp = s.scaled.get();
+                dc->SetTarget(old_target.get());
+            }
+        }
+    } else if (std::abs(card_scale - 1.0f) > 0.0005f) {
+        if (!s.scaled.get() && FAILED(dc->CreateBitmap(size, nullptr, 0, props, &s.scaled))) s.scaled.reset();
+        if (s.scaled.get()) {
+            D2D1_MATRIX_3X2_F old_tf{};
+            dc->GetTransform(&old_tf);
+            dc->SetTarget(s.scaled.get());
+            dc->BeginDraw();
+            dc->Clear(D2D1::ColorF(0, 0, 0, 0));
+            dc->SetTransform(D2D1::Matrix3x2F::Scale(card_scale, card_scale, open_origin_));
+            dc->DrawBitmap(bmp, D2D1::RectF(0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h)),
+                           1.0f, D2D1_INTERPOLATION_MODE_LINEAR);
+            dc->SetTransform(old_tf);
+            if (SUCCEEDED(dc->EndDraw())) src_bmp = s.scaled.get();
+            dc->SetTarget(old_target.get());
+        }
+    }
+
+    // GPU -> CPU readback.
+    auto cpu_props = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.0f, 96.0f);
+    if (!s.readback.get() && FAILED(dc->CreateBitmap(size, nullptr, 0, cpu_props, &s.readback))) return false;
+    ID2D1Bitmap1* cpu = s.readback.get();
+    if (FAILED(cpu->CopyFromBitmap(nullptr, src_bmp, nullptr))) return false;
+    D2D1_MAPPED_RECT mapped{};
+    if (FAILED(cpu->Map(D2D1_MAP_OPTIONS_READ, &mapped))) return false;
+
+    // (Re)create the staging DIB.
+    if (!s.mem_dc) s.mem_dc = CreateCompatibleDC(nullptr);
+    if (s.dib && (s.w != w || s.h != h)) {
+        DeleteObject(s.dib);
+        s.dib = nullptr;
+    }
+    if (!s.dib) {
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = w;
+        bmi.bmiHeader.biHeight = -h; // top-down
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        s.dib = CreateDIBSection(s.mem_dc, &bmi, DIB_RGB_COLORS, &s.bits, nullptr, 0);
+        if (!s.dib) {
+            cpu->Unmap();
+            return false;
+        }
+        s.w = w;
+        s.h = h;
+    }
+    for (int row = 0; row < h; ++row) {
+        std::memcpy(static_cast<uint8_t*>(s.bits) + (size_t)row * w * 4,
+                    static_cast<const uint8_t*>(mapped.bits) + (size_t)row * mapped.pitch,
+                    (size_t)w * 4);
+    }
+    cpu->Unmap();
+    return true;
+}
+
+void FluentMenu::Present(BYTE alpha, int y_offset_px) {
+    if (!surf_.dib || !surf_.bits) return;
+    HGDIOBJ old = SelectObject(surf_.mem_dc, surf_.dib);
+    POINT dst{ base_x_, base_y_ + y_offset_px };
+    POINT src{ 0, 0 };
+    SIZE sz{ surf_.w, surf_.h };
+    BLENDFUNCTION blend{ AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA };
+    UpdateLayeredWindow(hwnd_, nullptr, &dst, &sz, surf_.mem_dc, &src, 0, &blend, ULW_ALPHA);
+    SelectObject(surf_.mem_dc, old);
+    present_offset_ = y_offset_px;
+    present_alpha_ = alpha;
+    if (filter_fn_ && edit_ && open_ && !animating_out_)
+        PlaceFilterEdit(y_offset_px);
+}
+
+void FluentMenu::PresentSub(BYTE alpha) {
+    if (!sub_->hwnd || !sub_->surf.dib || !sub_->surf.bits) return;
+    alpha = (std::min)(alpha, sub_->alpha);
+    HGDIOBJ old = SelectObject(sub_->surf.mem_dc, sub_->surf.dib);
+    POINT dst{ sub_->x + sub_->dx, sub_->y + sub_->dy };
+    POINT src{ 0, 0 };
+    SIZE sz{ sub_->surf.w, sub_->surf.h };
+    BLENDFUNCTION blend{ AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA };
+    UpdateLayeredWindow(sub_->hwnd, nullptr, &dst, &sz, sub_->surf.mem_dc, &src, 0,
+                        &blend, ULW_ALPHA);
+    SelectObject(sub_->surf.mem_dc, old);
+}
+
+bool FluentMenu::EnsureSubWindow() {
+    if (sub_->hwnd) return true;
+    if (!hwnd_) return false;
+    // Same class as the main popup (registered in EnsureWindow); the shared
+    // wndproc routes by hwnd.
+    sub_->hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                                kMenuClass, L"PulseSubMenu", WS_POPUP,
+                                0, 0, 10, 10, hwnd_, nullptr,
+                                GetModuleHandleW(nullptr), this);
+    return sub_->hwnd != nullptr;
+}
+
+size_t FluentMenu::SubmenuDepth() const {
+    for (size_t i = 0; i < deeper_subs_.size(); ++i)
+        if (deeper_subs_[i].get() == sub_) return i + 1;
+    return 0;
+}
+
+FluentMenu::SubmenuState* FluentMenu::SubmenuAt(size_t depth) {
+    if (depth == 0) return &first_sub_;
+    while (deeper_subs_.size() < depth) deeper_subs_.push_back(std::make_unique<SubmenuState>());
+    return deeper_subs_[depth - 1].get();
+}
+
+void FluentMenu::SelectDeepestSubmenu() {
+    sub_ = &first_sub_;
+    for (const auto& state : deeper_subs_) {
+        if (state->parent_row < 0) break;
+        sub_ = state.get();
+    }
+}
+
+void FluentMenu::CloseSubmenusFrom(size_t depth) {
+    for (size_t i = depth; i <= deeper_subs_.size(); ++i) {
+        auto* state = SubmenuAt(i);
+        state->parent_row = state->hover = state->hover_swatch = state->pending_row = -1;
+        state->animating = false;
+        state->dx = state->dy = 0;
+        state->alpha = 255;
+        state->plate.Hide();
+        if (state->hwnd) ShowWindow(state->hwnd, SW_HIDE);
+    }
+}
+
+void FluentMenu::HideSubWindow() {
+    sub_pending_row_ = -1;
+    CloseSubmenusFrom(0);
+}
+
+bool FluentMenu::TickSubMotion() {
+    if (!sub_->animating || sub_->parent_row < 0) return false;
+    const float e = std::chrono::duration<float, std::milli>(
+        std::chrono::steady_clock::now() - sub_->anim_start).count();
+    const ::pulse::ui::motion::SpringSpec spec = sub_->fade ? ::pulse::ui::motion::spring::Pop : ::pulse::ui::motion::spring::Plate;
+    const bool done = e >= 260.0f;
+    const float k = done ? 1.0f : ::pulse::ui::motion::SpringProgress(spec, e);
+    sub_->dx = static_cast<int>(std::lround(static_cast<float>(sub_->from_dx) * (1.0f - k)));
+    sub_->dy = static_cast<int>(std::lround(static_cast<float>(sub_->from_dy) * (1.0f - k)));
+    sub_->alpha = sub_->fade ? static_cast<BYTE>(std::lround(255.0f * ::pulse::ui::motion::EaseOutCubic(e / 110.0f))) : 255;
+    if (done) {
+        sub_->animating = false;
+        sub_->dx = sub_->dy = 0;
+        sub_->alpha = 255;
+    }
+    PresentSub(255);
+    return !done;
+}
+
+// Opens a cascading flyout for a row, anchored to its parent card's right
+// edge (flips to the left when the work area runs out).
+void FluentMenu::OpenSubmenu(int row, size_t depth) {
+    SubmenuState* parent = depth > 0 ? SubmenuAt(depth - 1) : nullptr;
+    const FluentMenuModel& parent_model = parent ? parent->model : model_;
+    const FluentMenuItem* it = parent_model.At(row);
+    if (!it || !it->enabled || it->children.empty() || !compositor_) return;
+    sub_ = SubmenuAt(depth);
+    if (row == sub_->parent_row) return; // already showing this row's children
+    if (!EnsureSubWindow()) return;
+    CloseSubmenusFrom(depth + 1);
+    sub_->model.SetRowHeightDip(model_.RowHeightPx() / scale_);
+    sub_->plate.SetAnimationsEnabled(motion_);
+    const bool was_shown = sub_->parent_row >= 0 && IsWindowVisible(sub_->hwnd);
+    const int shown_y = sub_->y + sub_->dy;
+    const int shown_x = sub_->x + sub_->dx;
+    sub_->model.SetItems(it->children);
+    sub_->model.Layout(compositor_->DwriteFactory(), scale_);
+    sub_->parent_row = row;
+    sub_->hover = -1;
+    sub_->hover_swatch = -1;
+    sub_pending_row_ = -1;
+
+    const int content_w = sub_->model.WidthPx();
+    const int w = content_w + kShadowMargin * 2;
+    const int h = sub_->model.HeightPx() + kShadowMargin * 2;
+    const int overlap = (int)std::lround(4.0f * scale_);
+    // First child row lines up with the header row.
+    const int parent_x = parent ? parent->x : base_x_;
+    const int parent_y = parent ? parent->y : base_y_ + present_offset_;
+    int y = parent_y + static_cast<int>((parent ? 0.0f : FilterHeaderPx() - scroll_y_) +
+        parent_model.RowTopPx(row) - sub_->model.RowTopPx(0));
+    int x = parent_x + parent_model.WidthPx() - overlap;
+
+    HMONITOR mon = MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{ sizeof(mi) };
+    GetMonitorInfoW(mon, &mi);
+    // Keep a cascade moving in the same direction. Flipping each card
+    // independently at the screen edge alternated over the ancestor cards.
+    bool open_left = false;
+    if (parent) {
+        const int ancestor_x = depth > 1 ? SubmenuAt(depth - 2)->x : base_x_;
+        open_left = parent->x < ancestor_x;
+    } else if (std::any_of(it->children.begin(), it->children.end(),
+                           [](const FluentMenuItem& child) { return !child.children.empty(); })) {
+        const int left_space = parent_x + kShadowMargin - mi.rcWork.left;
+        const int right_space = mi.rcWork.right - (x + kShadowMargin);
+        open_left = left_space > right_space;
+    }
+    if (open_left || x + kShadowMargin + content_w > mi.rcWork.right)
+        x = parent_x - content_w + overlap;
+    if (x + kShadowMargin < mi.rcWork.left &&
+        parent_x + parent_model.WidthPx() + content_w + kShadowMargin - overlap <= mi.rcWork.right)
+        x = parent_x + parent_model.WidthPx() - overlap;
+    if (y + h - kShadowMargin > mi.rcWork.bottom)
+        y = mi.rcWork.bottom - h + kShadowMargin;
+    if (y < mi.rcWork.top - kShadowMargin) y = mi.rcWork.top - kShadowMargin;
+    x = (std::max)(static_cast<int>(mi.rcWork.left) - kShadowMargin, x);
+    sub_->x = x;
+    sub_->y = y;
+    sub_->surf.plate.reset();
+    sub_->animating = false;
+    sub_->dx = sub_->dy = 0;
+    sub_->alpha = 255;
+    if (motion_) {
+        sub_->anim_start = std::chrono::steady_clock::now();
+        sub_->animating = true;
+        sub_->fade = !was_shown;
+        if (was_shown) {
+            sub_->from_dx = shown_x - x;
+            sub_->from_dy = shown_y - y;
+        } else {
+            const int travel = static_cast<int>(std::lround(6.0f * scale_));
+            sub_->from_dx = x < base_x_ ? travel : -travel; // slide away from the parent card
+            sub_->from_dy = 0;
+            sub_->alpha = 0;
+        }
+        sub_->dx = sub_->from_dx;
+        sub_->dy = sub_->from_dy;
+    }
+    // Frame first, then show: a hidden flyout still holds the last child list
+    // it presented, which would flash at full opacity for one frame.
+    if (!was_shown) SetWindowPos(sub_->hwnd, nullptr, x + sub_->dx, y + sub_->dy, w, h,
+                                 SWP_NOACTIVATE | SWP_NOZORDER);
+    if (RenderSub()) PresentSub(255);
+    SetWindowPos(sub_->hwnd, topmost_ ? HWND_TOPMOST : HWND_TOP, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    if (Render()) Present(present_alpha_, present_offset_); // header row stays active
+}
+
+void FluentMenu::CloseSubmenu() {
+    const bool was_open = sub_->parent_row >= 0;
+    const size_t depth = SubmenuDepth();
+    const int parent_row = sub_->parent_row;
+    CloseSubmenusFrom(depth);
+    sub_ = SubmenuAt(depth > 0 ? depth - 1 : 0);
+    if (depth > 0) {
+        sub_->hover = parent_row;
+        if (RenderSub()) PresentSub(255);
+    }
+    if (was_open && open_ && !animating_out_ && Render()) Present(present_alpha_, present_offset_);
+}
+
+void FluentMenu::OnSubMouse(POINT client_pt, bool button_up) {
+    if (!open_ || animating_out_ || sub_->parent_row < 0) return;
+    const float y = (float)client_pt.y - (float)kShadowMargin;
+    int row = sub_->model.HitTestRow(y);
+    const FluentMenuItem* it = sub_->model.At(row);
+    if (it && (!it->enabled || it->heading)) {
+        row = -1;
+        it = nullptr;
+    }
+    const size_t depth = SubmenuDepth();
+    const bool header = it && !it->children.empty();
+    if (button_up) {
+        if (header) { OpenSubmenu(row, depth + 1); return; }
+        const int command = InvokeAt(sub_->model, row, static_cast<float>(client_pt.x));
+        if (command != 0) {
+            result_ = command;
+            Dismiss();
+        }
+        return;
+    }
+    if (header) {
+        if (sub_->pending_row != row) {
+            sub_->pending_row = row;
+            sub_->pending_since = std::chrono::steady_clock::now();
+        }
+    } else {
+        sub_->pending_row = -1;
+        if (row >= 0) CloseSubmenusFrom(depth + 1);
+    }
+    const int swatch = HitTestSwatch(sub_->model, row, static_cast<float>(client_pt.x));
+    if (row != sub_->hover || swatch != sub_->hover_swatch) {
+        sub_->hover = row;
+        sub_->hover_swatch = swatch;
+        if (RenderSub()) PresentSub(255);
+    }
+}
+
+void FluentMenu::OnMouse(POINT client_pt, bool button_up) {
+    if (!open_ || animating_out_) return;
+    float y = (float)client_pt.y - (float)kShadowMargin - FilterHeaderPx();
+    const float body_h = BodyHeightPx();
+    int row = y >= 0 && y < body_h ? model_.HitTestRow(y + scroll_y_) : -1;
+    const FluentMenuItem* it = model_.At(row);
+    const bool flyout_header = it && it->enabled && !it->children.empty();
+    if (button_up) {
+        if (flyout_header) {
+            OpenSubmenu(row); // a header never returns a command
+            return;
+        }
+        if (row >= 0) {
+            int cmd = InvokeAt(row, static_cast<float>(client_pt.x));
+            if (cmd != 0) {
+                result_ = cmd;
+                Dismiss();
+            }
+        }
+        return;
+    }
+    UpdateHover(row, HitTestSwatch(row, static_cast<float>(client_pt.x)));
+    UpdateTooltip(row);
+    // Flyout scheduling: dwell on a header opens it; moving to another row
+    // closes it. Leaving the window (towards the flyout) keeps it open.
+    if (flyout_header) {
+        if (row != sub_->parent_row && sub_pending_row_ != row) {
+            sub_pending_row_ = row;
+            sub_pending_since_ = std::chrono::steady_clock::now();
+        }
+    } else if (row >= 0) {
+        sub_pending_row_ = -1;
+        if (sub_->parent_row >= 0) CloseSubmenu();
+    } else {
+        sub_pending_row_ = -1;
+    }
+}
+
+void FluentMenu::UpdateTooltip(int row) {
+    // Drawn like the main window's tooltip (flyout fill, card stroke, 4 dip
+    // radius, small text) instead of the system tooltip control.
+    const auto* item = model_.At(row);
+    // Ellipsized labels (long Explorer verbs) show their full text.
+    const std::wstring text = !item ? std::wstring{}
+        : !item->tooltip.empty() ? item->tooltip
+        : model_.Truncated(row) ? item->text : std::wstring{};
+    if (text == tooltip_text_) return;
+    tooltip_text_ = text;
+    if (text.empty()) {
+        if (tooltip_) ShowWindow(tooltip_, SW_HIDE);
+        return;
+    }
+    if (!tooltip_ && hwnd_) {
+        // No create param: the shared wndproc treats it as a plain window.
+        tooltip_ = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE |
+                                   WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+                                   kMenuClass, L"PulseMenuTip", WS_POPUP, 0, 0, 1, 1, hwnd_,
+                                   nullptr, GetModuleHandleW(nullptr), nullptr);
+    }
+    if (!tooltip_ || !RenderTip(text)) return;
+    POINT pt{};
+    GetCursorPos(&pt);
+    HMONITOR mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{sizeof(mi)};
+    GetMonitorInfoW(mon, &mi);
+    int x = pt.x + static_cast<int>(12.0f * scale_);
+    int y = pt.y + static_cast<int>(18.0f * scale_);
+    x = (std::min)(x, static_cast<int>(mi.rcWork.right) - tip_surf_.w);
+    if (y + tip_surf_.h > mi.rcWork.bottom) y = pt.y - tip_surf_.h - static_cast<int>(8.0f * scale_);
+    x = (std::max)(x, static_cast<int>(mi.rcWork.left));
+    HGDIOBJ old = SelectObject(tip_surf_.mem_dc, tip_surf_.dib);
+    POINT dst{x, y};
+    POINT src{0, 0};
+    SIZE sz{tip_surf_.w, tip_surf_.h};
+    BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    UpdateLayeredWindow(tooltip_, nullptr, &dst, &sz, tip_surf_.mem_dc, &src, 0, &blend, ULW_ALPHA);
+    SelectObject(tip_surf_.mem_dc, old);
+    SetWindowPos(tooltip_, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+bool FluentMenu::RenderTip(const std::wstring& text) {
+    ID2D1DeviceContext* dc = compositor_ ? compositor_->Dc() : nullptr;
+    IDWriteFactory2* dwrite = compositor_ ? compositor_->DwriteFactory() : nullptr;
+    IDWriteTextFormat* fmt = compositor_ ? compositor_->SmallFormat() : nullptr;
+    if (!dc || !dwrite || !fmt || text.empty()) return false;
+    const MenuPixelDpiScope pixel_dpi(dc);
+    std::vector<std::wstring> lines;
+    for (size_t start = 0;;) {
+        const size_t nl = text.find(L'\n', start);
+        lines.push_back(text.substr(start, nl == std::wstring::npos ? std::wstring::npos : nl - start));
+        if (nl == std::wstring::npos || lines.size() >= 6) break;
+        start = nl + 1;
+    }
+    float tw = 0.0f;
+    for (const auto& line : lines) tw = (std::max)(tw, MeasureWidth(dwrite, fmt, line));
+    const float line_h = 18.0f * scale_;
+    const bool multi = lines.size() > 1;
+    const int w = static_cast<int>(std::ceil((std::min)(tw + 20.0f * scale_, 480.0f * scale_)));
+    const int h = static_cast<int>(std::ceil(multi ? 10.0f * scale_ + line_h * lines.size() : 28.0f * scale_));
+    if (w <= 0 || h <= 0) return false;
+
+    D2D1_SIZE_U size{static_cast<UINT32>(w), static_cast<UINT32>(h)};
+    auto props = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
+    ComPtr<ID2D1Bitmap1> bmp;
+    if (FAILED(dc->CreateBitmap(size, nullptr, 0, props, &bmp))) return false;
+    ComPtr<ID2D1Image> old_target;
+    dc->GetTarget(&old_target);
+    dc->SetTarget(bmp.get());
+    const D2D1_TEXT_ANTIALIAS_MODE old_text_aa = dc->GetTextAntialiasMode();
+    dc->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    const bool high_contrast = IsHighContrast();
+    const TextContrastScope text_contrast_scope(high_contrast);
+    dc->BeginDraw();
+    dc->Clear(D2D1::ColorF(0, 0, 0, 0));
+    const Theme theme = high_contrast ? MakeHighContrastTheme() : MakeTheme(dark_, accent_);
+    // The layered window has nothing behind it: flatten the flyout colour onto bg.
+    D2D1_COLOR_F fill = theme.surface_flyout;
+    const float a = fill.a;
+    fill = D2D1::ColorF(fill.r * a + theme.bg.r * (1.0f - a), fill.g * a + theme.bg.g * (1.0f - a),
+                        fill.b * a + theme.bg.b * (1.0f - a), 1.0f);
+    const float r = 4.0f * scale_;
+    const D2D1_RECT_F card = D2D1::RectF(0.5f, 0.5f, w - 0.5f, h - 0.5f);
+    ComPtr<ID2D1SolidColorBrush> brush;
+    dc->CreateSolidColorBrush(fill, &brush);
+    if (brush.get()) {
+        dc->FillRoundedRectangle(D2D1::RoundedRect(card, r, r), brush.get());
+        brush->SetColor(theme.stroke_card);
+        dc->DrawRoundedRectangle(D2D1::RoundedRect(card, r, r), brush.get(), 1.0f);
+        brush->SetColor(theme.text);
+        for (size_t i = 0; i < lines.size(); ++i) {
+            const float top = multi ? 5.0f * scale_ + line_h * i : 0.0f;
+            const float row_h = multi ? line_h : static_cast<float>(h);
+            ComPtr<IDWriteTextLayout> layout;
+            if (FAILED(dwrite->CreateTextLayout(lines[i].c_str(), static_cast<UINT32>(lines[i].size()), fmt,
+                    (std::max)(1.0f, w - 20.0f * scale_), row_h, &layout)) || !layout.get()) continue;
+            layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            compositor_->DrawTextLayout(D2D1::Point2F(10.0f * scale_, top), layout.get(), brush.get(),
+                                        D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
+    }
+    const HRESULT hr = dc->EndDraw();
+    dc->SetTextAntialiasMode(old_text_aa);
+    dc->SetTarget(old_target.get());
+    if (FAILED(hr)) return false;
+
+    auto cpu_props = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
+    ComPtr<ID2D1Bitmap1> cpu;
+    if (FAILED(dc->CreateBitmap(size, nullptr, 0, cpu_props, &cpu))) return false;
+    if (FAILED(cpu->CopyFromBitmap(nullptr, bmp.get(), nullptr))) return false;
+    D2D1_MAPPED_RECT mapped{};
+    if (FAILED(cpu->Map(D2D1_MAP_OPTIONS_READ, &mapped))) return false;
+    Surface& s = tip_surf_;
+    if (!s.mem_dc) s.mem_dc = CreateCompatibleDC(nullptr);
+    if (s.dib && (s.w != w || s.h != h)) {
+        DeleteObject(s.dib);
+        s.dib = nullptr;
+    }
+    if (!s.dib) {
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = w;
+        bmi.bmiHeader.biHeight = -h;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        s.dib = CreateDIBSection(s.mem_dc, &bmi, DIB_RGB_COLORS, &s.bits, nullptr, 0);
+        if (!s.dib) {
+            cpu->Unmap();
+            return false;
+        }
+        s.w = w;
+        s.h = h;
+    }
+    for (int y = 0; y < h; ++y) {
+        std::memcpy(static_cast<uint8_t*>(s.bits) + static_cast<size_t>(y) * w * 4,
+                    static_cast<const uint8_t*>(mapped.bits) + static_cast<size_t>(y) * mapped.pitch,
+                    static_cast<size_t>(w) * 4);
+    }
+    cpu->Unmap();
+    return true;
+}
+
+void FluentMenu::UpdateHover(int row, int swatch) {
+    if (row >= 0) {
+        const FluentMenuItem* it = model_.At(row);
+        if (it && (!it->enabled || it->heading)) {
+            row = -1;
+            swatch = -1;
+        } else if (!it || it->quick_swatches.empty()) {
+            swatch = -1;
+        } else if (HasLayoutTiles(*it) && swatch < 0) {
+            swatch = 0;
+        }
+    }
+    if (row == hover_row_ && swatch == hover_swatch_) return;
+    UpdateTooltip(-1);
+    hover_row_ = row;
+    hover_swatch_ = swatch;
+    if (row >= 0 && Scrollable()) {
+        const float top = model_.RowTopPx(row);
+        // The first row of a palette group brings its heading along.
+        const FluentMenuItem* above = model_.At(row - 1);
+        const float reveal = above && above->heading ? model_.RowTopPx(row - 1) : top;
+        if (reveal < scroll_y_) scroll_y_ = reveal <= model_.RowTopPx(0) + 0.5f ? 0.0f : reveal;
+        if (top + model_.RowHeightPx(row) > scroll_y_ + ViewportPx())
+            scroll_y_ = row == model_.Count() - 1 ? MaxScrollPx()
+                                                  : top + model_.RowHeightPx(row) - ViewportPx();
+    }
+    if (Render()) Present(present_alpha_, present_offset_);
+}
+
+int FluentMenu::HitTestSwatch(int row, float client_x) const {
+    return HitTestSwatch(model_, row, client_x);
+}
+
+int FluentMenu::HitTestSwatch(const FluentMenuModel& model, int row, float client_x) const {
+    const FluentMenuItem* item = model.At(row);
+    if (!item || !item->enabled || item->quick_swatches.empty()) return -1;
+    const float spacing = SwatchSpacingDip(*item) * scale_;
+    const float radius = SwatchHitRadiusDip(*item) * scale_;
+    const float strip_width = spacing * static_cast<float>(item->quick_swatches.size() - 1);
+    const float first = static_cast<float>(kShadowMargin) +
+        (static_cast<float>(model.WidthPx()) - strip_width) * 0.5f;
+    for (size_t i = 0; i < item->quick_swatches.size(); ++i) {
+        const float center = first + spacing * static_cast<float>(i);
+        if (std::abs(client_x - center) <= radius)
+            return static_cast<int>(i);
+    }
+    return -1;
+}
+
+int FluentMenu::InvokeRow(int row) {
+    const FluentMenuItem* it = model_.At(row);
+    if (!it || !it->enabled) return 0;
+    return it->command;
+}
+
+int FluentMenu::InvokeAt(int row, float client_x) const {
+    return InvokeAt(model_, row, client_x);
+}
+
+int FluentMenu::InvokeAt(const FluentMenuModel& model, int row, float client_x) const {
+    const FluentMenuItem* item = model.At(row);
+    if (item && item->enabled && item->trailing_command &&
+        client_x >= kShadowMargin + model.WidthPx() - 36.0f * scale_ &&
+        client_x < kShadowMargin + model.WidthPx() - 6.0f * scale_)
+        return item->trailing_command;
+    if (!item || !item->enabled || item->quick_swatches.empty())
+        return item && item->enabled ? item->command : 0;
+    const int swatch = HitTestSwatch(model, row, client_x);
+    if (swatch >= 0) return item->quick_swatches[static_cast<size_t>(swatch)].command;
+    return item->command;
+}
+
+bool FluentMenu::HandleMnemonicKey(const MSG& msg) {
+    if (filter_fn_ || animating_out_ || !open_) return false;
+    if (msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN) return false;
+    if (GetKeyState(VK_CONTROL) & 0x8000) return false; // Ctrl+C etc. stay app shortcuts
+    UINT vk = static_cast<UINT>(msg.wParam);
+    // An active IME (Chinese/Japanese input in the window behind) reports
+    // VK_PROCESSKEY; menus take the physical key, as native menus do.
+    if (vk == VK_PROCESSKEY) vk = ImmGetVirtualKey(msg.hwnd);
+    wchar_t latin = 0;
+    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9'))
+        latin = static_cast<wchar_t>(vk);
+    else if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9)
+        latin = static_cast<wchar_t>(L'0' + (vk - VK_NUMPAD0));
+    // The keyboard layout's own character covers non-Latin access keys.
+    const UINT mapped = MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR);
+    wchar_t layout = (mapped & 0x80000000u) ? 0 : static_cast<wchar_t>(mapped & 0xFFFF);
+    if (layout <= L' ') layout = 0;
+    if (!latin && !layout) return false; // navigation / function keys
+
+    // Keys go to the flyout only once it has a highlighted row, like native
+    // menus: a flyout merely opened by hovering leaves the parent current.
+    const bool in_sub = sub_->parent_row >= 0 && sub_->hover >= 0;
+    const FluentMenuModel& model = in_sub ? sub_->model : model_;
+    const auto targets = FindMenuMnemonic(model.Items(), latin, layout);
+    if (targets.empty()) return true;
+    if (targets.size() == 1) {
+        const MenuMnemonicTarget target = targets.front();
+        const FluentMenuItem* item = model.At(target.row);
+        if (!item) return true;
+        if (target.swatch >= 0) {
+            result_ = item->quick_swatches[static_cast<size_t>(target.swatch)].command;
+            Dismiss();
+        } else if (!item->children.empty()) {
+            if (!in_sub) UpdateHover(target.row);
+            OpenSubmenu(target.row, in_sub ? SubmenuDepth() + 1 : 0);
+            sub_->hover = sub_->model.FirstEnabled();
+            if (RenderSub()) PresentSub(255);
+        } else if (item->command != 0) {
+            result_ = item->command;
+            Dismiss();
+        }
+        return true;
+    }
+    const size_t next = NextMenuMnemonicTarget(targets, in_sub ? sub_->hover : hover_row_,
+                                               in_sub ? sub_->hover_swatch : hover_swatch_);
+    if (in_sub) {
+        sub_->hover = targets[next].row;
+        sub_->hover_swatch = targets[next].swatch;
+        if (RenderSub()) PresentSub(255);
+    } else {
+        CloseSubmenu();
+        UpdateHover(targets[next].row, targets[next].swatch);
+    }
+    return true;
+}
+
+float FluentMenu::FilterHeaderPx() const {
+    if (!filter_fn_ || external_edit_) return 0.0f;
+    if (anchor_to_rect_) {
+        const float h = static_cast<float>(anchor_rect_.bottom - anchor_rect_.top);
+        return (std::max)(h, 32.0f * scale_);
+    }
+    return 44.0f * scale_;
+}
+
+bool FluentMenu::IsPaletteHwnd(HWND hwnd) const {
+    if (!hwnd) return false;
+    if (hwnd == hwnd_ || hwnd == edit_ || hwnd == external_edit_ || hwnd == first_sub_.hwnd) return true;
+    for (const auto& state : deeper_subs_) if (hwnd == state->hwnd) return true;
+    return false;
+}
+
+bool FluentMenu::EnsureFilterEdit() {
+    if (!filter_fn_ || !hwnd_ || external_edit_) return false;
+    // The menu outlives settings changes: follow the interface font size.
+    if (!edit_font_ || edit_font_generation_ != typography::Generation() ||
+        std::abs(edit_font_scale_ - scale_) > 0.001f) {
+        if (HFONT font = typography::CreateEditFont(scale_)) {
+            if (edit_font_) DeleteObject(edit_font_);
+            edit_font_ = font;
+            edit_font_generation_ = typography::Generation();
+            edit_font_scale_ = scale_;
+            if (edit_) SendMessageW(edit_, WM_SETFONT, reinterpret_cast<WPARAM>(edit_font_), FALSE);
+        }
+    }
+    if (edit_brush_) { DeleteObject(edit_brush_); edit_brush_ = nullptr; }
+    edit_brush_ = CreateSolidBrush(dark_ ? RGB(30, 30, 30) : RGB(255, 255, 255));
+    if (edit_) return true;
+
+    edit_ = CreateChildEdit(hwnd_);
+    if (!edit_) return false;
+    SetWindowTheme(edit_, L"", L"");
+    SendMessageW(edit_, WM_SETFONT, (WPARAM)edit_font_, TRUE);
+    SendMessageW(edit_, EM_SETCUEBANNER, TRUE,
+        reinterpret_cast<LPARAM>(l10n::Get(l10n::StringId::TabMenuSearch).c_str()));
+    SetWindowSubclass(edit_, FilterEditProc, 1, reinterpret_cast<DWORD_PTR>(this));
+    return true;
+}
+
+void FluentMenu::ApplyFilterLead() {
+    if (!edit_) return;
+    if (filter_lead_.empty()) {
+        RemovePropW(edit_, L"Pulse.EditLead");
+        RemovePropW(edit_, L"Pulse.EditLeadColor");
+        RemovePropW(edit_, L"Pulse.EditTail");
+        return;
+    }
+    // Dark: the accent lifted toward white, as accent text reads there.
+    const float lift = dark_ ? 0.45f : 0.0f;
+    const auto channel = [lift](float c) {
+        return static_cast<UINT_PTR>(std::lround((c + (1.0f - c) * lift) * 255.0f)) & 0xFFu;
+    };
+    const UINT_PTR rgb = 0x01000000u | channel(accent_.r) | (channel(accent_.g) << 8) | (channel(accent_.b) << 16);
+    SetPropW(edit_, L"Pulse.EditLead", const_cast<wchar_t*>(filter_lead_.c_str()));
+    SetPropW(edit_, L"Pulse.EditLeadColor", reinterpret_cast<HANDLE>(rgb));
+    if (filter_lead_hint_.empty()) RemovePropW(edit_, L"Pulse.EditTail");
+    else SetPropW(edit_, L"Pulse.EditTail", const_cast<wchar_t*>(filter_lead_hint_.c_str()));
+}
+
+void FluentMenu::PlaceFilterEdit(int y_offset_px) {
+    if (!edit_ || !filter_fn_ || external_edit_) return;
+    const float s = scale_;
+    int x = 0, y = 0, w = 40, cell_h = 18;
+    if (anchor_to_rect_) {
+        const float left = 12.0f * s;
+        const float right = 8.0f * s;
+        x = anchor_rect_.left + static_cast<int>(std::lround(left));
+        w = std::max(40, static_cast<int>(std::lround(
+            static_cast<float>(anchor_rect_.right - anchor_rect_.left) - left - right)));
+        cell_h = std::max(18, static_cast<int>(anchor_rect_.bottom - anchor_rect_.top));
+        y = anchor_rect_.top;
+    } else {
+        const float header = FilterHeaderPx();
+        const float field_l = static_cast<float>(kShadowMargin) + 8.0f * s;
+        const float field_t = static_cast<float>(kShadowMargin) + 6.0f * s;
+        const float field_r = static_cast<float>(kShadowMargin + model_.WidthPx()) - 8.0f * s;
+        const float field_b = static_cast<float>(kShadowMargin) + header - 4.0f * s;
+        const float text_l = field_l + 34.0f * s;
+        const float text_r = field_r - 8.0f * s;
+        x = base_x_ + static_cast<int>(std::lround(text_l));
+        y = base_y_ + y_offset_px + static_cast<int>(std::lround(field_t));
+        w = std::max(40, static_cast<int>(std::lround(text_r - text_l)));
+        cell_h = std::max(18, static_cast<int>(std::lround(field_b - field_t)));
+    }
+    const int line_h = EditLineHeight(edit_, edit_font_, cell_h);
+    y += std::max(0, (cell_h - line_h) / 2);
+    POINT client{x, y};
+    ScreenToClient(hwnd_, &client);
+    SetWindowPos(edit_, HWND_TOP, client.x, client.y, w, line_h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+void FluentMenu::HideFilterEdit() {
+    if (edit_ && IsWindow(edit_)) ShowWindow(edit_, SW_HIDE);
+}
+
+void FluentMenu::SyncFilterFromEdit() {
+    const HWND edit = external_edit_ ? external_edit_ : edit_;
+    if (!edit || !filter_fn_) return;
+    const int length = GetWindowTextLengthW(edit);
+    std::wstring text(static_cast<size_t>(length) + 1, L'\0');
+    text.resize(GetWindowTextW(edit, text.data(), length + 1));
+    if (filter_query_ == text) return;
+    if (TakeEmptyFilterKey(text)) {
+        SetWindowTextW(edit, L"");
+        return;
+    }
+    filter_query_ = std::move(text);
+    RefreshFilter();
+}
+
+bool FluentMenu::TakeEmptyFilterKey(const std::wstring& typed) {
+    if (!filter_query_.empty() || typed.size() != 1) return false;
+    for (const auto& [key, command] : empty_filter_keys_) {
+        if (key != typed[0]) continue;
+        result_ = command;
+        Dismiss();
+        return true;
+    }
+    return false;
+}
+
+LRESULT CALLBACK FluentMenu::ExternalFilterEditProc(HWND hwnd, UINT msg, WPARAM wParam,
+        LPARAM lParam, UINT_PTR, DWORD_PTR data) {
+    auto* self = reinterpret_cast<FluentMenu*>(data);
+    if (msg == WM_IME_STARTCOMPOSITION) self->filter_composing_ = true;
+    if (msg == WM_IME_ENDCOMPOSITION) self->filter_composing_ = false;
+    if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && self->HandleFilterKey(msg, wParam))
+        return 0;
+    if (!self->filter_composing_ && msg == WM_CHAR && (wParam == VK_RETURN || wParam == VK_ESCAPE || wParam == VK_TAB))
+        return 0;
+    const auto result = DefSubclassProc(hwnd, msg, wParam, lParam);
+    if (!self->filter_composing_ && (msg == WM_CHAR || msg == WM_SETTEXT || msg == WM_PASTE || msg == WM_CUT ||
+        msg == WM_CLEAR || msg == WM_UNDO || msg == WM_KEYDOWN || msg == WM_IME_ENDCOMPOSITION))
+        self->SyncFilterFromEdit();
+    return result;
+}
+
+LRESULT CALLBACK FluentMenu::FilterEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                            UINT_PTR, DWORD_PTR dwRefData) {
+    auto* self = reinterpret_cast<FluentMenu*>(dwRefData);
+    if (!self) return DefSubclassProc(hwnd, msg, wParam, lParam);
+    // Menu-specific: IME state, navigation keys and live filtering.
+    if (msg == WM_IME_STARTCOMPOSITION) self->filter_composing_ = true;
+    if (msg == WM_IME_ENDCOMPOSITION) self->filter_composing_ = false;
+    if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && !self->filter_composing_ &&
+        (wParam == VK_ESCAPE || wParam == VK_UP || wParam == VK_DOWN || wParam == VK_RETURN)) {
+        self->HandleFilterKey(msg, wParam);
+        return 0;
+    }
+    if (msg == WM_CHAR && (wParam == VK_RETURN || wParam == VK_ESCAPE)) return 0;
+    // ← → open and close a row's flyout; otherwise they move the caret.
+    if (msg == WM_KEYDOWN && !self->filter_composing_ && (wParam == VK_LEFT || wParam == VK_RIGHT) &&
+        self->HandleFilterKey(msg, wParam))
+        return 0;
+    // Everything visual is the shared hosted-edit handling: LumaText
+    // presentation, the caret timer, and the switch back to the native EDIT
+    // when a layered present fails (so the filter never turns invisible).
+    LRESULT result = 0;
+    if (!self->compositor_) {
+        result = DefSubclassProc(hwnd, msg, wParam, lParam);
+    } else {
+        const D2D1_COLOR_F fg = ColorFromRef(EditTextColor(self->dark_));
+        const D2D1_COLOR_F bg = ColorFromRef(EditBackColor(self->dark_));
+        IDWriteTextFormat* format = self->compositor_->TextFormat();
+        if (!HandleChildEditMessage(*self->compositor_, format, fg, bg, EditBackBrush(self->edit_brush_),
+                                    hwnd, msg, wParam, lParam, result)) {
+            result = DefPresentedChildEditProc(*self->compositor_, format, fg, bg, hwnd, msg, wParam, lParam);
+        }
+    }
+    // Delete has no WM_CHAR; every message that can change the text resyncs
+    // (SyncFilterFromEdit returns early when nothing changed).
+    if (!self->filter_composing_ &&
+        (msg == WM_CHAR || msg == WM_KEYDOWN || msg == WM_PASTE || msg == WM_CUT || msg == WM_CLEAR ||
+         msg == WM_UNDO || msg == WM_SETTEXT || msg == WM_IME_ENDCOMPOSITION))
+        self->SyncFilterFromEdit();
+    return result;
+}
+
+bool FluentMenu::AppendFilterChar(wchar_t ch) {
+    if (!filter_fn_ || ch < 32 || ch == 127) return false;
+    if (TakeEmptyFilterKey(std::wstring(1, ch))) return true;
+    filter_query_.push_back(ch);
+    RefreshFilter();
+    return true;
+}
+
+void FluentMenu::PasteFilterText() {
+    if (!filter_fn_ || !OpenClipboard(hwnd_ ? hwnd_ : owner_)) return;
+    HANDLE data = GetClipboardData(CF_UNICODETEXT);
+    if (data) {
+        if (const wchar_t* text = static_cast<const wchar_t*>(GlobalLock(data))) {
+            for (const wchar_t* p = text; *p; ++p) {
+                if (*p >= 32 && *p != 127) filter_query_.push_back(*p);
+            }
+            GlobalUnlock(data);
+            RefreshFilter();
+        }
+    }
+    CloseClipboard();
+}
+
+bool FluentMenu::HandleFilterKey(UINT msg, WPARAM wParam) {
+    if (filter_composing_) return false;
+    if (!filter_fn_ || animating_out_) return false;
+    if (msg == WM_CHAR || msg == WM_SYSCHAR)
+        return AppendFilterChar(static_cast<wchar_t>(wParam));
+    if (msg != WM_KEYDOWN && msg != WM_SYSKEYDOWN) return false;
+
+    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    if (ctrl && wParam == VK_TAB) {
+        result_ = 0;
+        open_ = false;
+        forward_tab_key_ = true;
+        UpdateTooltip(-1);
+        HideFilterEdit();
+        HideSubWindow();
+        if (hwnd_) ShowWindow(hwnd_, SW_HIDE);
+        return true;
+    }
+    // A row's flyout (the palette's 排序方式 ›): → or Enter opens it, ↑ ↓
+    // move in it, Enter runs the choice, ← or Esc closes only the flyout.
+    if (sub_->parent_row >= 0 && sub_->hover >= 0) {
+        if (wParam == VK_ESCAPE || wParam == VK_LEFT) {
+            CloseSubmenu();
+            return true;
+        }
+        if (wParam == VK_DOWN || wParam == VK_UP) {
+            sub_->hover = sub_->model.NextEnabled(sub_->hover, wParam == VK_DOWN ? 1 : -1);
+            if (RenderSub()) PresentSub(255);
+            return true;
+        }
+        if (wParam == VK_RETURN || wParam == VK_RIGHT) {
+            const FluentMenuItem* child = sub_->model.At(sub_->hover);
+            if (child && child->enabled && !child->children.empty()) {
+                OpenSubmenu(sub_->hover, SubmenuDepth() + 1);
+                sub_->hover = sub_->model.FirstEnabled();
+                if (RenderSub()) PresentSub(255);
+            } else if (child && child->enabled && child->command != 0) {
+                result_ = child->command;
+                Dismiss();
+            }
+            return true;
+        }
+    }
+    if (wParam == VK_RIGHT || wParam == VK_RETURN) {
+        const FluentMenuItem* row = hover_row_ >= 0 ? model_.At(hover_row_) : nullptr;
+        bool caret_at_end = true;  // → still moves the caret inside the text
+        if (wParam == VK_RIGHT) {
+            const HWND edit = external_edit_ ? external_edit_ : edit_;
+            if (edit) {
+                DWORD lo = 0, hi = 0;
+                SendMessageW(edit, EM_GETSEL, reinterpret_cast<WPARAM>(&lo), reinterpret_cast<LPARAM>(&hi));
+                caret_at_end = lo == hi && static_cast<int>(hi) >= GetWindowTextLengthW(edit);
+            }
+        }
+        if (row && row->enabled && !row->children.empty() && caret_at_end) {
+            if (sub_->parent_row != hover_row_) OpenSubmenu(hover_row_);
+            sub_->hover = sub_->model.FirstEnabled();
+            if (RenderSub()) PresentSub(255);
+            return true;
+        }
+        if (wParam == VK_RIGHT) return false;
+    }
+    if (wParam == VK_ESCAPE) {
+        UpdateTooltip(-1);
+        result_ = 0;
+        HideFilterEdit();
+        animating_out_ = true;
+        anim_start_ = std::chrono::steady_clock::now();
+        return true;
+    }
+    if (wParam == VK_DOWN || wParam == VK_UP) {
+        int next = hover_row_ < 0
+            ? model_.FirstEnabled()
+            : model_.NextEnabled(hover_row_, wParam == VK_DOWN ? 1 : -1);
+        UpdateHover(next);
+        return true;
+    }
+    if (wParam == VK_RETURN) {
+        int cmd = 0;
+        if (hover_row_ >= 0) {
+            const FluentMenuItem* it = model_.At(hover_row_);
+            cmd = it && it->enabled && hover_swatch_ >= 0 &&
+                          static_cast<size_t>(hover_swatch_) < it->quick_swatches.size()
+                      ? it->quick_swatches[static_cast<size_t>(hover_swatch_)].command
+                      : InvokeRow(hover_row_);
+        }
+        // A highlighted row without a command of its own (a swatch strip
+        // under the resting pointer) must not swallow Enter: commit the text.
+        if (cmd != 0) {
+            result_ = cmd;
+        } else {
+            filter_committed_ = true;
+            result_ = 0;
+        }
+        Dismiss();
+        return true;
+    }
+    if (wParam == VK_BACK) {
+        if (edit_ || external_edit_) return false;
+        if (!filter_query_.empty()) {
+            filter_query_.pop_back();
+            RefreshFilter();
+        }
+        return true;
+    }
+    if (ctrl && (wParam == L'V' || wParam == L'v')) {
+        if (edit_ || external_edit_) return false;
+        PasteFilterText();
+        return true;
+    }
+    return false;
+}
+
+int FluentMenu::RunModalLoop() {
+    MSG msg{};
+    // The fade-out starts from what is on screen: a dismiss during the
+    // fade-in must not flash back to opaque or snap the slide into place.
+    bool fade_out_started = false;
+    BYTE out_alpha = 255;
+    int out_offset = 0;
+    while (open_) {
+        // WM_ACTIVATE is sent, not queued, and a hidden tray owner never
+        // becomes active. Observe the real foreground across thread/process
+        // boundaries, including Explorer closing its notification overflow.
+        if (activate_on_open_) {
+            if (IsPaletteHwnd(GetForegroundWindow())) activation_confirmed_ = true;
+            else if (activation_confirmed_ || std::chrono::steady_clock::now() - anim_start_ > std::chrono::milliseconds(250)) {
+                result_ = 0;
+                open_ = false;
+                break;
+            }
+        }
+        bool animating = false;
+        // Animation progress (fade + slide for open, fade for dismiss).
+        if (hwnd_) {
+            double elapsed = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - anim_start_).count();
+            if (animating_out_) {
+                if (!fade_out_started) {
+                    fade_out_started = true;
+                    out_alpha = present_alpha_;
+                    out_offset = present_offset_;
+                }
+                // Exit is quicker than entry: 90ms, shrinking to 0.97 about the
+                // anchor while fading from the alpha on screen.
+                const float kOutMs = motion_ ? 90.0f : 1.0f;
+                float t = (float)(elapsed / kOutMs);
+                if (t >= 1.0f) {
+                    open_ = false;
+                    ShowWindow(hwnd_, SW_HIDE);
+                    break;
+                }
+                if (motion_) {
+                    close_k_ = t;
+                    open_t_ms_ = -1.0f;
+                    Render();
+                }
+                const float fade = 1.0f - t * t;  // ease-in
+                Present((BYTE)std::lround(out_alpha * fade), out_offset);
+                for (size_t depth = 0; depth <= deeper_subs_.size(); ++depth) {
+                    sub_ = SubmenuAt(depth);
+                    if (sub_->parent_row < 0) break;
+                    PresentSub((BYTE)std::lround(255.0f * fade));
+                }
+                sub_ = &first_sub_;
+                animating = true;
+            } else {
+                // Open (pulse_motion_v2): grow from the anchor with the Pop
+                // spring, 90ms fade, 4dip travel from the anchor side
+                // (slide_sign_), rows staggered in RenderSurface. The filter
+                // palette keeps the plain fade.
+                fluent::MotionSpec spec{ 120.0f, fluent::EasingCurve::OutQuad };
+                float t = fluent::EvaluateMotion(spec, (float)elapsed);
+                if (open_t_ms_ >= 0.0f) {
+                    const float kOpenMs = morph_ ? 420.0f : 330.0f;
+                    const float e = static_cast<float>(elapsed);
+                    open_t_ms_ = e >= kOpenMs ? -1.0f : e;
+                    const float fade = ::pulse::ui::motion::EaseOutCubic(e / (morph_ ? 40.0f : 90.0f));
+                    const float travel = morph_ ? 0.0f
+                        : 4.0f * scale_ * (1.0f - ::pulse::ui::motion::SpringProgress(::pulse::ui::motion::spring::Pop, e));
+                    if (Render())
+                        Present(static_cast<BYTE>(std::lround(255.0f * fade)),
+                                static_cast<int>(std::lround(static_cast<float>(slide_sign_) * travel)));
+                    animating = open_t_ms_ >= 0.0f;
+                } else if (present_alpha_ == 255 && present_offset_ == 0) {
+                    // settled
+                } else if (!motion_) {
+                    Present(255, 0);
+                } else if (t < 1.0f) {
+                    const float dip = (anchor_to_rect_ && filter_fn_)
+                        ? 0.0f : fluent::motion::MenuTravelDip * scale_;
+                    Present((BYTE)(255 * t),
+                            (int)std::lround(static_cast<float>(slide_sign_) * dip * (1.0f - t)));
+                    animating = true;
+                } else {
+                    Present(255, 0);
+                }
+            }
+        }
+        // Hover plates still gliding, flyout sliding in or moving.
+        if (open_ && !animating_out_ && hwnd_) {
+            const uint64_t now_ms = ::pulse::ui::motion::NowMs();
+            if (open_t_ms_ < 0.0f && plate_.Active(now_ms) && Render()) {
+                Present(present_alpha_, present_offset_);
+                animating = true;
+            }
+            for (size_t depth = 0; depth <= deeper_subs_.size(); ++depth) {
+                sub_ = SubmenuAt(depth);
+                if (sub_->parent_row < 0) break;
+                const bool sub_glide = sub_->plate.Active(now_ms);
+                if (sub_glide) RenderSub();
+                if (TickSubMotion()) animating = true;
+                else if (sub_glide) PresentSub(255);
+                if (sub_glide) animating = true;
+                if (sub_->pending_row >= 0 && std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - sub_->pending_since).count() >= 120.0) {
+                    const int row = sub_->pending_row;
+                    sub_->pending_row = -1;
+                    if (row == sub_->hover) OpenSubmenu(row, depth + 1);
+                }
+            }
+            sub_ = &first_sub_;
+        }
+        // Hover-to-open flyout delay (like native menus; 120ms, prototype
+        // token - 200ms felt sluggish next to the gliding plate).
+        if (open_ && !animating_out_ && sub_pending_row_ >= 0) {
+            const double dwell = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - sub_pending_since_).count();
+            if (dwell >= 120.0) {
+                const int r = sub_pending_row_;
+                sub_pending_row_ = -1;
+                if (r == hover_row_) OpenSubmenu(r);
+            }
+        }
+        if (open_ && !animating_out_ && Scrollable() && TickBar()) animating = true;
+        // Animation frames follow the compositor: a 16 ms timeout rounds up to
+        // two 15.6 ms timer ticks, which left the 120 ms fade ~4 uneven frames
+        // (smooth only while the pointer moved).
+        // MWMO_INPUTAVAILABLE also wakes for messages a bounded drain below
+        // left queued, not only for ones that arrived since the last peek.
+        if (!animating || FAILED(DwmFlush()))
+            MsgWaitForMultipleObjectsEx(0, nullptr, animating ? 1 : 16, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        if (topmost_ && open_ && !animating_out_ &&
+            ((GetAsyncKeyState(VK_LBUTTON) | GetAsyncKeyState(VK_RBUTTON)) & 0x8000)) {
+            // A press over the foreign overlay never reaches this thread's
+            // queue; treat it like any other click outside the palette.
+            POINT cursor{};
+            GetCursorPos(&cursor);
+            const HWND under = WindowFromPoint(cursor);
+            if (under && !IsPaletteHwnd(under) &&
+                GetWindowThreadProcessId(under, nullptr) != GetCurrentThreadId()) {
+                result_ = 0;
+                open_ = false;
+                HideFilterEdit();
+                HideSubWindow();
+                ShowWindow(hwnd_, SW_HIDE);
+            }
+        }
+        // While the owner animates (rows leaving after a delete, the recycle
+        // gulp) its frame pump posts a frame every vsync and paints it
+        // synchronously, so draining until empty would last as long as that
+        // motion and the menu, opened at alpha 0, would only fade in after it.
+        const auto drain_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(8);
+        while (open_ && PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) {
+                open_ = false;
+                PostQuitMessage((int)msg.wParam);
+                break;
+            }
+            bool swallow = false;
+            if (open_ && !animating_out_) {
+                switch (msg.message) {
+                case WM_MOUSEWHEEL:
+                    if (Scrollable()) {
+                        SendMessageW(hwnd_, WM_MOUSEWHEEL, msg.wParam, msg.lParam);
+                        swallow = true;
+                    }
+                    break;
+                case WM_KEYDOWN:
+                case WM_SYSKEYDOWN:
+                    SelectDeepestSubmenu();
+                    if (HandleFilterKey(msg.message, msg.wParam)) {
+                        swallow = true;
+                    } else if (!filter_fn_ && msg.wParam == VK_ESCAPE) {
+                        if (sub_->parent_row >= 0) {
+                            CloseSubmenu(); // first Esc only closes the flyout
+                        } else {
+                            result_ = 0;
+                            animating_out_ = true;
+                            anim_start_ = std::chrono::steady_clock::now();
+                        }
+                        swallow = true;
+                    } else if (!filter_fn_ && (msg.wParam == VK_DOWN || msg.wParam == VK_UP)) {
+                        if (sub_->parent_row >= 0) {
+                            sub_->hover = sub_->hover < 0
+                                ? sub_->model.FirstEnabled()
+                                : sub_->model.NextEnabled(sub_->hover, msg.wParam == VK_DOWN ? 1 : -1);
+                            if (RenderSub()) PresentSub(255);
+                        } else {
+                            int next = hover_row_ < 0
+                                ? model_.FirstEnabled()
+                                : model_.NextEnabled(hover_row_, msg.wParam == VK_DOWN ? 1 : -1);
+                            UpdateHover(next);
+                        }
+                        swallow = true;
+                    } else if (!filter_fn_ && (msg.wParam == VK_RIGHT || msg.wParam == VK_LEFT) &&
+                               sub_->parent_row < 0 && model_.At(hover_row_) && HasLayoutTiles(*model_.At(hover_row_))) {
+                        const auto count=static_cast<int>(model_.At(hover_row_)->quick_swatches.size());
+                        UpdateHover(hover_row_, (std::max(0,hover_swatch_)+(msg.wParam==VK_RIGHT?1:count-1))%count);
+                        swallow=true;
+                    } else if (!filter_fn_ && msg.wParam == VK_RIGHT && sub_->parent_row >= 0) {
+                        const auto* row = sub_->model.At(sub_->hover);
+                        if (row && row->enabled && !row->children.empty()) {
+                            OpenSubmenu(sub_->hover, SubmenuDepth() + 1);
+                            sub_->hover = sub_->model.FirstEnabled();
+                            if (RenderSub()) PresentSub(255);
+                        }
+                        swallow = true;
+                    } else if (!filter_fn_ && msg.wParam == VK_RIGHT && sub_->parent_row < 0 &&
+                               hover_row_ >= 0 && model_.At(hover_row_) &&
+                               !model_.At(hover_row_)->children.empty()) {
+                        OpenSubmenu(hover_row_);
+                        sub_->hover = sub_->model.FirstEnabled();
+                        if (RenderSub()) PresentSub(255);
+                        swallow = true;
+                    } else if (!filter_fn_ && msg.wParam == VK_LEFT && sub_->parent_row >= 0) {
+                        CloseSubmenu();
+                        swallow = true;
+                    } else if (!filter_fn_ && msg.wParam == VK_RETURN) {
+                        if (sub_->parent_row >= 0) {
+                            const FluentMenuItem* child = sub_->model.At(sub_->hover);
+                            if (child && child->enabled && !child->children.empty()) {
+                                OpenSubmenu(sub_->hover, SubmenuDepth() + 1);
+                                sub_->hover = sub_->model.FirstEnabled();
+                                if (RenderSub()) PresentSub(255);
+                            } else if (child && child->enabled && child->command != 0) {
+                                result_ = child->command;
+                                Dismiss();
+                            }
+                        } else if (hover_row_ >= 0) {
+                            const FluentMenuItem* hov = model_.At(hover_row_);
+                            if (hov && hov->enabled && !hov->children.empty()) {
+                                OpenSubmenu(hover_row_);
+                                sub_->hover = sub_->model.FirstEnabled();
+                                if (RenderSub()) PresentSub(255);
+                            } else {
+                                int cmd = hov && HasLayoutTiles(*hov) && hover_swatch_ >= 0
+                                    ? hov->quick_swatches[static_cast<size_t>(hover_swatch_)].command : InvokeRow(hover_row_);
+                                if (cmd != 0) { result_ = cmd; Dismiss(); }
+                            }
+                        }
+                        swallow = true;
+                    } else if (HandleMnemonicKey(msg)) {
+                        swallow = true;
+                    } else if (filter_fn_ && !edit_ && !external_edit_) {
+                        msg.hwnd = hwnd_;
+                        TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                        swallow = true;
+                    }
+                    sub_ = &first_sub_;
+                    break;
+                case WM_KEYUP:
+                case WM_SYSKEYUP:
+                    if (filter_fn_ && !edit_ && !external_edit_) swallow = true;
+                    break;
+                case WM_CHAR:
+                case WM_SYSCHAR:
+                    if (!edit_ && !external_edit_ && HandleFilterKey(msg.message, msg.wParam)) swallow = true;
+                    break;
+                case WM_LBUTTONDOWN:
+                case WM_RBUTTONDOWN:
+                case WM_MBUTTONDOWN:
+                case WM_NCLBUTTONDOWN:
+                case WM_NCRBUTTONDOWN:
+                    if (!IsPaletteHwnd(msg.hwnd)) {
+                        result_ = 0;
+                        open_ = false;
+                        HideFilterEdit();
+                        HideSubWindow();
+                        ShowWindow(hwnd_, SW_HIDE);
+                    }
+                    break;
+                case WM_ACTIVATE:
+                    if (msg.hwnd == owner_ && LOWORD(msg.wParam) == WA_INACTIVE) {
+                        HWND newly = reinterpret_cast<HWND>(msg.lParam);
+                        if (!IsPaletteHwnd(newly)) {
+                            result_ = 0;
+                            open_ = false;
+                            HideFilterEdit();
+                            HideSubWindow();
+                            ShowWindow(hwnd_, SW_HIDE);
+                        }
+                    }
+                    break;
+                default:
+                    break;
+                }
+            }
+            if (!swallow) {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            if (std::chrono::steady_clock::now() >= drain_deadline) break;
+        }
+    }
+    HideSubWindow();
+    if (hwnd_ && IsWindow(hwnd_)) ShowWindow(hwnd_, SW_HIDE);
+    HideFilterEdit();
+    return result_;
+}
+
+int FluentMenu::TrackDropdown(RECT control_rect, std::vector<FluentMenuItem> items) {
+    SetDropdownRect(control_rect);
+    for (auto& item : items) {
+        if (item.checked) item.glyph = L"\xE73E";
+    }
+    return TrackPopup({control_rect.left, control_rect.bottom}, std::move(items));
+}
+
+int FluentMenu::TrackPopup(POINT screen_pt, std::vector<FluentMenuItem> items,
+                           FilterFn filter, bool top_center) {
+    if (!EnsureWindow()) {
+        dropdown_ = false;
+        external_edit_ = nullptr;
+        max_visible_rows_ = 0;
+        return 0;
+    }
+    drag_row_ = -1;
+    dragged_command_ = 0;
+    HideSubWindow(); // stale flyout state from the previous invocation
+    // Acrylic is baked from what the window shows now; never reuse a plate.
+    acrylic_active_ = AcrylicEnabled() && compositor_ && compositor_->FrameCopy() &&
+                      SystemAllowsPopupAcrylic();
+    surf_.plate.reset();
+    sub_->surf.plate.reset();
+    icon_bitmaps_.clear();
+    filter_fn_ = std::move(filter);
+    filter_query_ = initial_filter_text_;
+    filter_committed_ = false;
+    filter_composing_ = false;
+    forward_tab_key_ = false;
+    popup_pt_ = screen_pt;
+    top_center_ = top_center;
+    scroll_y_ = 0.0f;
+    body_limit_px_ = 0.0f;
+    overflow_ = false;
+    bar_hot_ = false;
+    bar_drag_ = false;
+    bar_fade_ = {};
+    if (items.empty() && !filter_fn_) {
+        dropdown_ = false;
+        external_edit_ = nullptr;
+        max_visible_rows_ = 0;
+        return 0;
+    }
+    const float minW = filter_fn_
+        ? (filter_min_width_ > 0.0f ? filter_min_width_ : 440.0f) * scale_
+        : dropdown_ ? static_cast<float>(dropdown_rect_.right - dropdown_rect_.left) : 0.0f;
+    model_.SetItems(std::move(items));
+    model_.Layout(compositor_->DwriteFactory(), scale_, minW);
+    hover_row_ = hover_first_on_open_ ? model_.FirstEnabled() : -1;
+    hover_swatch_ = -1;
+    result_ = 0;
+    animating_out_ = false;
+    LayoutWindow(screen_pt);
+    motion_ = ::pulse::ui::motion::SystemAnimationsEnabled();
+    plate_.SetAnimationsEnabled(motion_);
+    sub_->plate.SetAnimationsEnabled(motion_);
+    plate_.Hide();
+    sub_->plate.Hide();
+    ++plate_context_;
+    close_k_ = 0.0f;
+    open_t_ms_ = (motion_ && !(anchor_to_rect_ && filter_fn_)) ? 0.0f : -1.0f;
+    {
+        // Grow from where the menu was asked for: the cursor, the dropdown's
+        // edge, or the top centre of a centred palette.
+        const float cw = static_cast<float>(model_.WidthPx());
+        const float ch = static_cast<float>(std::ceil(BodyHeightPx())) + FilterHeaderPx();
+        const float m = static_cast<float>(kShadowMargin);
+        float ox = static_cast<float>(screen_pt.x - base_x_);
+        float oy = static_cast<float>(screen_pt.y - base_y_);
+        if (dropdown_) {
+            ox = static_cast<float>((dropdown_rect_.left + dropdown_rect_.right) / 2 - base_x_);
+            oy = slide_sign_ < 0 ? m : m + ch;
+        } else if (anchor_to_rect_) {
+            ox = static_cast<float>(anchor_rect_.left - base_x_);
+            oy = static_cast<float>(anchor_rect_.top - base_y_);
+        } else if (top_center_) {
+            ox = m + cw * 0.5f;
+            oy = m;
+        }
+        open_origin_ = D2D1::Point2F(std::clamp(ox, m, m + cw), std::clamp(oy, m, m + ch));
+        morph_ = morph_next_ && open_t_ms_ >= 0.0f;
+        if (morph_) {
+            // The pill starts flush with the card's top edge under the button.
+            const float bw = static_cast<float>(morph_button_.right - morph_button_.left);
+            const float bh = (std::min)(static_cast<float>(morph_button_.bottom - morph_button_.top), ch);
+            const float left = std::clamp(static_cast<float>(morph_button_.left - base_x_), m, m + cw);
+            const float right = std::clamp(left + bw, left + 1.0f, m + cw);
+            const bool above = static_cast<float>(morph_button_.top - base_y_) > m + ch * 0.5f;
+            morph_from_ = above ? D2D1::RectF(left, m + ch - bh, right, m + ch)
+                                : D2D1::RectF(left, m, right, m + bh);
+        }
+        morph_next_ = false;
+    }
+    if (!Render()) {
+        external_edit_ = nullptr;
+        max_visible_rows_ = 0;
+        ShowWindow(hwnd_, SW_HIDE);
+        anchor_to_rect_ = false;
+        dropdown_ = false;
+        hover_first_on_open_ = true;
+        select_all_on_open_ = true;
+        return 0;
+    }
+    open_ = true;
+    anim_start_ = std::chrono::steady_clock::now();
+    const float travel = open_t_ms_ >= 0.0f ? 4.0f : fluent::motion::MenuTravelDip;
+    const int slide = (anchor_to_rect_ && filter_fn_) || !motion_ || morph_
+        ? 0 : (int)std::lround(static_cast<float>(slide_sign_) * travel * scale_);
+    Present(motion_ ? 0 : 255, slide);
+    activation_confirmed_ = false;
+    SetWindowPos(hwnd_, topmost_ ? HWND_TOPMOST : HWND_TOP, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW |
+                     ((activate_on_open_ || (filter_fn_ && !external_edit_)) ? 0 : SWP_NOACTIVATE));
+    if (activate_on_open_) {
+        SetForegroundWindow(hwnd_);
+        SetFocus(hwnd_);
+    }
+    if (external_edit_) {
+        HideFilterEdit();
+        SetWindowSubclass(external_edit_, ExternalFilterEditProc, 2, reinterpret_cast<DWORD_PTR>(this));
+    } else if (filter_fn_ && EnsureFilterEdit()) {
+        ApplyFilterLead();
+        SetWindowTextW(edit_, filter_query_.c_str());
+        PlaceFilterEdit(slide);
+        SetForegroundWindow(GetAncestor(edit_, GA_ROOT));
+        SetFocus(edit_);
+        if (select_all_on_open_) {
+            SendMessageW(edit_, EM_SETSEL, 0, -1);
+        } else {
+            const int len = GetWindowTextLengthW(edit_);
+            SendMessageW(edit_, EM_SETSEL, len, len);
+        }
+    } else {
+        HideFilterEdit();
+    }
+    int popup_result = 0;
+    {
+        const bool command_menu = !filter_fn_ && !external_edit_;
+        ImeSuspension ime(command_menu ? GetFocus() : nullptr, command_menu ? hwnd_ : nullptr);
+        popup_result = RunModalLoop();
+    }
+    if (external_edit_) RemoveWindowSubclass(external_edit_, ExternalFilterEditProc, 2);
+    external_edit_ = nullptr;
+    UpdateTooltip(-1);
+    initial_filter_text_.clear();
+    filter_lead_.clear();
+    filter_lead_hint_.clear();
+    ApplyFilterLead();
+    filter_min_width_ = 0.0f;
+    empty_filter_keys_.clear();
+    max_visible_rows_ = 0;
+    scroll_y_ = 0.0f;
+    overflow_ = false;
+    bar_hot_ = false;
+    bar_drag_ = false;
+    bar_fade_ = {};
+    anchor_to_rect_ = false;
+    dropdown_ = false;
+    hover_first_on_open_ = true;
+    select_all_on_open_ = true;
+    // Queue only after the modal loop has unwound, avoiding nested tab changes.
+    if (forward_tab_key_ && owner_) PostMessageW(owner_, WM_KEYDOWN, VK_TAB, 0);
+    return popup_result;
+}
+
+void FluentMenu::RefreshFilter() {
+    if (!filter_fn_ || !compositor_) return;
+    auto items = filter_fn_(filter_query_);
+    scroll_y_ = 0.0f;
+    UpdateTooltip(-1);
+    if (items.empty()) {
+        FluentMenuItem none;
+        none.text = filter_query_.empty() ? pulse::l10n::Get(pulse::l10n::StringId::MenuTypeSearch).c_str() : pulse::l10n::Get(pulse::l10n::StringId::MenuNoMatch).c_str();
+        none.enabled = false;
+        items.push_back(std::move(none));
+    }
+    model_.SetItems(std::move(items));
+    model_.Layout(compositor_->DwriteFactory(), scale_,
+                  (filter_min_width_ > 0.0f ? filter_min_width_ : 440.0f) * scale_);
+    hover_row_ = model_.FirstEnabled();
+    hover_swatch_ = -1;
+    LayoutWindow(popup_pt_);
+    if (Render()) Present(present_alpha_, present_offset_);
+    // Refresh only the results; a cached internal editor may be hidden while
+    // an external search field owns input, selection and IME composition.
+}
+
+void FluentMenu::RequestFilterRefresh() {
+    if (hwnd_ && open_) PostMessageW(hwnd_, WM_APP, 0, 0);
+}
+
+bool FluentMenu::ReplaceItems(std::vector<FluentMenuItem> items) {
+    if (!open_ || animating_out_ || filter_fn_ || !compositor_ || items.empty()) return false;
+    // A flyout owns a copy of its parent row's children (and the controller
+    // keeps the display snapshot their IDs come from): while one is visible,
+    // that row must stay exactly as shown.
+    if (sub_->parent_row >= 0) {
+        const FluentMenuItem* parent = model_.At(sub_->parent_row);
+        if (!parent || sub_->parent_row >= static_cast<int>(items.size()) ||
+            !SameFlyoutRow(*parent, items[static_cast<size_t>(sub_->parent_row)]))
+            return false;
+    }
+    if (model_.PatchCommands(items)) {
+        // Commands alone change nothing visible; icons that came with the
+        // live answer do.
+        bool icons = false;
+        for (const auto& it : items) icons = icons || it.icon != nullptr;
+        if (icons) Render();
+        return true;
+    }
+    // Same shape, other contents: late rows already mapped onto the shown
+    // ones. The old in-place rebuild (#73) moved rows under the cursor; rows
+    // the first frame could not place are now appended below the shown ones.
+    if (items.size() == static_cast<size_t>(model_.Count())) {
+        if (!model_.PatchInPlace(std::move(items), compositor_->DwriteFactory())) return false;
+    } else {
+        if (!model_.PatchGrow(std::move(items), compositor_->DwriteFactory())) return false;
+        // The same placement as at open: the top edge stays unless the taller
+        // menu would leave the work area (then it lifts, or scrolls).
+        const int top = base_y_;
+        const int left = base_x_;
+        LayoutWindow(popup_pt_);
+        if ((base_y_ != top || base_x_ != left) && sub_->parent_row >= 0) HideSubWindow();
+    }
+    if (const FluentMenuItem* it = model_.At(hover_row_); it && !it->enabled &&
+        hover_row_ != sub_->parent_row)
+        hover_row_ = -1;
+    if (sub_pending_row_ >= 0) {
+        const FluentMenuItem* pending = model_.At(sub_pending_row_);
+        if (!pending || pending->children.empty() || !pending->enabled) sub_pending_row_ = -1;
+    }
+    // The pointer rests on a row that just got its flyout (a predicted row
+    // whose live answer arrived): open it after the usual dwell, as if the
+    // pointer had just arrived.
+    if (const FluentMenuItem* it = model_.At(hover_row_);
+        it && it->enabled && !it->children.empty() && sub_->parent_row < 0 &&
+        sub_pending_row_ != hover_row_) {
+        sub_pending_row_ = hover_row_;
+        sub_pending_since_ = std::chrono::steady_clock::now();
+    }
+    UpdateTooltip(-1);
+    // The modal loop presents every frame (and owns the open fade).
+    Render();
+    return true;
+}
+
+void FluentMenu::Dismiss() {
+    if (!open_) return;
+    UpdateTooltip(-1);
+    HideFilterEdit();
+    HideSubWindow();
+    animating_out_ = true;
+    anim_start_ = std::chrono::steady_clock::now();
+}
+
+bool FluentMenu::SaveDebugSnapshot(const wchar_t* png_path,
+                                   std::vector<FluentMenuItem> items, int hover_row) {
+    if (!compositor_ || items.empty()) return false;
+    acrylic_active_ = false;  // snapshots are not on screen: keep them solid
+    model_.SetItems(std::move(items));
+    model_.Layout(compositor_->DwriteFactory(), scale_, dropdown_
+        ? static_cast<float>(dropdown_rect_.right - dropdown_rect_.left) : filter_min_width_ * scale_);
+    hover_row_ = hover_row;
+    hover_swatch_ = -1;
+    // Motion regression shots: PULSE_MENUSHOT_OPEN_MS freezes the open
+    // transition at that time (grown from the top-left corner);
+    // PULSE_MENUSHOT_HOVER overrides the hovered row.
+    wchar_t env[32]{};
+    open_t_ms_ = -1.0f;
+    if (GetEnvironmentVariableW(L"PULSE_MENUSHOT_OPEN_MS", env, ARRAYSIZE(env)) > 0) {
+        motion_ = true;
+        open_t_ms_ = static_cast<float>(_wtof(env));
+        open_origin_ = D2D1::Point2F(static_cast<float>(kShadowMargin), static_cast<float>(kShadowMargin));
+    }
+    if (GetEnvironmentVariableW(L"PULSE_MENUSHOT_HOVER", env, ARRAYSIZE(env)) > 0)
+        hover_row_ = _wtoi(env);
+    const bool rendered = Render();
+    open_t_ms_ = -1.0f;
+    if (!rendered) return false;
+
+    ComPtr<IWICImagingFactory> wic;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&wic))))
+        return false;
+    ComPtr<IWICStream> stream;
+    wic->CreateStream(&stream);
+    if (!stream.get() || FAILED(stream->InitializeFromFilename(png_path, GENERIC_WRITE)))
+        return false;
+    ComPtr<IWICBitmapEncoder> encoder;
+    if (FAILED(wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder))) return false;
+    if (FAILED(encoder->Initialize(stream.get(), WICBitmapEncoderNoCache))) return false;
+    ComPtr<IWICBitmapFrameEncode> frame;
+    if (FAILED(encoder->CreateNewFrame(&frame, nullptr))) return false;
+    if (FAILED(frame->Initialize(nullptr))) return false;
+    if (FAILED(frame->SetSize((UINT)surf_.w, (UINT)surf_.h))) return false;
+    // The layered-window DIB contains premultiplied alpha. Tell WIC that
+    // explicitly; treating it as straight BGRA darkens thin CJK/icon strokes
+    // in visual-regression PNGs and makes them appear partially clipped.
+    WICPixelFormatGUID format = GUID_WICPixelFormat32bppPBGRA;
+    if (FAILED(frame->SetPixelFormat(&format))) return false;
+    if (FAILED(frame->WritePixels((UINT)surf_.h, (UINT)surf_.w * 4,
+                                  (UINT)surf_.w * 4 * (UINT)surf_.h,
+                                  static_cast<BYTE*>(surf_.bits))))
+        return false;
+    if (FAILED(frame->Commit())) return false;
+    return SUCCEEDED(encoder->Commit());
+}
+
+} // namespace pulse::ui
