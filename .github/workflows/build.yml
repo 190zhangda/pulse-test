@@ -45,6 +45,9 @@ jobs:
           for /f "usebackq delims=" %%V in ("version.txt") do set VERSION=%%V
           python tools\pack_installer\pack_portable.py --root . --build build --version %VERSION% --out dist\Pulse-%VERSION%-portable-win-x64 --zip dist\Pulse-%VERSION%-portable-win-x64.zip
 
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
       - name: Pack installer
         shell: cmd
         run: scripts\pack_setup.bat build
