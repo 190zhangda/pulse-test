@@ -52,10 +52,15 @@ jobs:
         shell: cmd
         run: scripts\pack_setup.bat build
 
+      - name: Check private key secret
+        shell: bash
+        run: |
+          if [ -n "${{ secrets.PULSE_UPDATE_PRIVATE_KEY }}" ]; then echo "HAS_KEY=yes" >> $GITHUB_ENV; else echo "HAS_KEY=no" >> $GITHUB_ENV; fi
+
       - name: Sign update manifest
+        if: env.HAS_KEY == 'yes'
         env:
           PULSE_PRIVATE_KEY: ${{ secrets.PULSE_UPDATE_PRIVATE_KEY }}
-        if: env.PULSE_PRIVATE_KEY != ''
         shell: pwsh
         run: |
           $key = Join-Path $env:RUNNER_TEMP 'update-private-key.pem'
@@ -66,9 +71,8 @@ jobs:
             -PrivateKey $key `
             -Output dist/update-manifest.json
 
-      - name: Upload installer + manifest
+      - name: Upload installer
         uses: actions/upload-artifact@v4
-        if: env.PULSE_PRIVATE_KEY != ''
         with:
           name: pulse-installer
           path: |
