@@ -3543,9 +3543,6 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
         } else if (hit.region == ui::HitTestResult::SettingsDiagnosticsAction) {
             s->settings.DiagnosticsAction(hit.index);
             InvalidateRect(hwnd, nullptr, FALSE);
-        } else if (hit.region == ui::HitTestResult::SettingsUpdateAction) {
-            if (hit.index == 0) CheckForUpdates(*s);
-            else if (hit.index == 1) InstallUpdate(*s);
         } else if (hit.region == ui::HitTestResult::SettingsDupScope) {
             if (!s->duplicateScan.scanning && hit.index >= 0 && hit.index <= 2) {
                 s->duplicateScan.scope = static_cast<app::DuplicateScanScope>(hit.index);

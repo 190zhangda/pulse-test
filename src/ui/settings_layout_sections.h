@@ -422,6 +422,7 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
 
         section(I::SettingsSecExplorer);
         l.shell_tags_row=row(52+wrap_height(l10n::Get(I::SettingsShellTagsDesc),right-left-126*scale));
+        l.quick_look_row=row(52+wrap_height(l10n::Get(I::QuickLookDesc),right-left-126*scale));
         section(I::StartupRestoreSection);
         const float restore_w=button_w(I::StartupRestoreAction,130);
         const float restore_text_width=right-left-(narrow?108*scale:128*scale+restore_w);

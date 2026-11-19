@@ -477,61 +477,16 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
             y += 128.0f * scale + 12.0f * scale;
         }
 
-        const float available_width = std::max(0.0f, card_right - card_left - 32.0f * scale);
-        const float check_w = std::min(available_width, label_btn_w(
-            pulse::l10n::Get(pulse::l10n::StringId::CheckForUpdates)));
-        const float download_w = std::min(available_width, label_btn_w(
-            pulse::l10n::Get(pulse::l10n::StringId::DownloadUpdate)));
-        const bool stack_updates = vm.settings_update_available && check_w + gap + download_w > available_width;
-        // The automatic-check switch sits between the status text and the buttons,
-        // like the performance switch in the diagnostics card.
-        const float auto_h = vm.settings_update_enabled ? 56.0f * scale : 0.0f;
-        const float update_h = 174.0f * scale + auto_h +
-            (stack_updates ? 40.0f * scale : 0.0f);
-        l.update_card = D2D1::RectF(card_left, y, card_right, y + update_h);
-        if (vm.settings_update_enabled)
-            l.update_auto_row = D2D1::RectF(card_left + 8.0f * scale, y + 106.0f * scale,
-                                            card_right - 8.0f * scale, y + 162.0f * scale);
-        const float check_y = y + update_h - (stack_updates ? 88.0f : 48.0f) * scale;
-        l.update_action[0] = D2D1::RectF(card_left + 16.0f * scale,
-                                         check_y,
-                                         card_left + 16.0f * scale + check_w,
-                                         check_y + 32.0f * scale);
-        const float download_x = stack_updates ? l.update_action[0].left : l.update_action[0].right + gap;
-        const float download_y = check_y + (stack_updates ? 40.0f * scale : 0.0f);
-        l.update_action[1] = D2D1::RectF(download_x, download_y,
-                                         download_x + download_w, download_y + 32.0f * scale);
-        y += update_h + 12.0f * scale;
-        if (!vm.settings_index_error.empty()) y += 44.0f * scale; // error text under the update card
-
-        // Release notes: a header row per embedded version; the expanded one gets a body.
-        const float release_top = y;
-        const float all_w = label_btn_w(pulse::l10n::Get(pulse::l10n::StringId::ReleaseAll));
-        l.release_all = D2D1::RectF(card_right - 16.0f * scale - all_w, release_top + 14.0f * scale,
-                                    card_right - 16.0f * scale, release_top + 46.0f * scale);
-        float ry = release_top + 70.0f * scale;
-        if (vm.settings_release_notes) {
-            const auto& notes = *vm.settings_release_notes;
-            const float row_left = card_left + 8.0f * scale;
-            const float row_right = card_right - 8.0f * scale;
-            const float text_w = ReleaseTextWidth(row_right - row_left, scale);
-            for (size_t i = 0; i < notes.size(); ++i) {
-                l.release_rows.push_back(D2D1::RectF(row_left, ry, row_right, ry + 36.0f * scale));
-                ry += 36.0f * scale;
-                if (static_cast<int>(i) != vm.settings_release_expanded) continue;
-                float body = 4.0f * scale;
-                const ReleaseNoteView& note = notes[i];
-                const ReleaseTagSummary tags = SummarizeReleaseTags(note);
-                const float tag_col = ReleaseTagColumn(painter, note, scale);
-                for (size_t k = 0; k < note.lines.size(); ++k)
-                    body += MeasureReleaseLine(painter, note, k, text_w, tag_col, tags, scale).Total() +
-                            kReleaseLineGapDip * scale;
-                l.release_body = D2D1::RectF(row_left, ry, row_right, ry + body);
-                ry += body + 4.0f * scale;
-            }
-        }
-        l.release_card = D2D1::RectF(card_left, release_top, card_right, ry + 10.0f * scale);
-        y = l.release_card.bottom + 24.0f * scale;
+        // Customization: the software-update card and the release-notes card are
+        // removed from this page, so the layout stops after the hints card.
+        l.update_card = {};
+        l.update_auto_row = {};
+        l.update_action[0] = {};
+        l.update_action[1] = {};
+        l.release_card = {};
+        l.release_all = {};
+        l.release_rows.clear();
+        l.release_body = {};
     } else if (vm.settings_page == 5 || vm.settings_page == 8) {
         y = LayoutSettingsPacks(l, vm, scale, y, painter);
     } else if (vm.settings_page == 6) {

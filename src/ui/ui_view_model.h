@@ -1448,6 +1448,7 @@ struct WindowViewModel {
     bool settings_integration_just_enabled = false; // confirmation line after turning it on
     std::wstring settings_integration_other_exe;     // another Pulse copy owns the associations
     bool settings_shell_tags = false;
+    bool settings_shell_quick_look = false;
     bool settings_alias_mark = false;   // 别名旁显示小图标 (AliasStore)
     std::vector<std::wstring> settings_ai_marks;   // row titles marked 「助手刚改的」
     float settings_inset_left = 0.0f;   // the docked 助手 column left of Settings (pixels)

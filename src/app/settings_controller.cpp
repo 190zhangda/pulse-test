@@ -1346,6 +1346,10 @@ void SettingsController::ToggleUi(int index) {
         // shell_tag_menu.cpp installs/removes the HKCU verbs on the next UI tick.
         prefs_->shell_tag_menu = !prefs_->shell_tag_menu;
         SaveAndApply(SettingsEffect::None);
+    } else if (index == 12) {
+        // quick_look_verb.cpp installs/removes the HKCU verb on the next UI tick.
+        prefs_->shell_quick_look = !prefs_->shell_quick_look;
+        SaveAndApply(SettingsEffect::None);
     } else if (index == 8) {
         prefs_->change_tracking_enabled = !prefs_->change_tracking_enabled;
         SaveAndApply(SettingsEffect::ChangeTracking);

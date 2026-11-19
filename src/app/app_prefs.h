@@ -51,6 +51,9 @@ struct AppPrefs {
     // take_over_explorer_windows. Direct Directory/Drive verbs remain enabled.
     bool integration_folders_compat = false;
     bool shell_tag_menu = false;    // File Explorer "Pulse tags" submenu (shell_tag_menu.cpp syncs HKCU)   // registry is the source of truth (not in app.json)
+    // File Explorer "快速预览" verb (quick_look_verb.cpp syncs HKCU): preview a
+    // file or folder with Quick Look without opening Pulse first.
+    bool shell_quick_look = false;
     bool verify_copies = false;
     bool show_status_performance = false;
     bool show_pinned_tab_names = true;

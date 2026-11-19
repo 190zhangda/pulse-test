@@ -66,6 +66,7 @@ void AppPrefs::ResetToDefaults() {
     take_over_explorer_windows = false;
     integration_folders_compat = false;
     shell_tag_menu = false;
+    shell_quick_look = false;
     verify_copies = false;
     show_status_performance = false;
     show_pinned_tab_names = true;
@@ -209,6 +210,8 @@ std::wstring AppPrefs::ToJson() const {
     out += integration_folders_compat ? L"true" : L"false";
     out += L",\n  \"shell_tag_menu\":";
     out += shell_tag_menu ? L"true" : L"false";
+    out += L",\n  \"shell_quick_look\":";
+    out += shell_quick_look ? L"true" : L"false";
     out += L",\n  \"verify_copies\":";
     out += verify_copies ? L"true" : L"false";
     out += L",\n  \"show_status_performance\":";
@@ -550,6 +553,7 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     integration_this_pc = pulse::json::ExtractBool(json, L"integration_this_pc", true);
     integration_recycle_bin = pulse::json::ExtractBool(json, L"integration_recycle_bin", !integration_configured);
     shell_tag_menu = pulse::json::ExtractBool(json, L"shell_tag_menu", false);
+    shell_quick_look = pulse::json::ExtractBool(json, L"shell_quick_look", false);
     verify_copies = pulse::json::ExtractBool(json, L"verify_copies", false);
     show_status_performance = pulse::json::ExtractBool(json, L"show_status_performance", false);
     show_pinned_tab_names = pulse::json::ExtractBool(json, L"show_pinned_tab_names", true);

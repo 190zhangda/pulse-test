@@ -521,6 +521,9 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 if (ContainsPt(lay.shell_tags_row, x, y)) {
                     r.region = HitTestResult::SettingsToggle; r.index = 21; return r;
                 }
+                if (ContainsPt(lay.quick_look_row, x, y)) {
+                    r.region = HitTestResult::SettingsToggle; r.index = 12; return r;
+                }
                 for (int i = 0; i < 3; ++i) if (ContainsPt(lay.blank_click_choice[i], x, y)) {
                     r.region = HitTestResult::SettingsBlankClick; r.index = i; return r;
                 }
@@ -675,8 +678,8 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     r.region=HitTestResult::SettingsToggle;r.index=100+static_cast<int>(i);return r;
                 }
             } else if (vm.settings_page == 3) {
-                for (int i = 0; i < 3; ++i) {
-                    if (ContainsPt(i < 2 ? lay.about_action[i] : lay.release_all, x, y)) {
+                for (int i = 0; i < 2; ++i) {
+                    if (ContainsPt(lay.about_action[i], x, y)) {
                         r.region = HitTestResult::SettingsAboutAction;
                         r.index = i;
                         return r;
@@ -686,13 +689,6 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     if (ContainsPt(lay.apps_row[i], x, y)) {
                         r.region = HitTestResult::SettingsAboutAction;
                         r.index = 3 + i;
-                        return r;
-                    }
-                }
-                for (size_t i = 0; i < lay.release_rows.size(); ++i) {
-                    if (ContainsPt(lay.release_rows[i], x, y)) {
-                        r.region = HitTestResult::SettingsReleaseNote;
-                        r.index = static_cast<int>(i);
                         return r;
                     }
                 }
@@ -721,20 +717,8 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                         return r;
                     }
                 }
-                for (int i = 0; i < 2; ++i) {
-                    const bool enabled = i == 0
-                        ? vm.settings_update_enabled && !vm.settings_update_checking &&
-                            !vm.settings_update_downloading && !vm.settings_update_installing
-                        : vm.settings_update_available && !vm.settings_update_installing;
-                    if (enabled && ContainsPt(lay.update_action[i], x, y)) {
-                        r.region = HitTestResult::SettingsUpdateAction;
-                        r.index = i;
-                        return r;
-                    }
-                }
-                if (ContainsPt(lay.update_auto_row, x, y)) {
-                    r.region = HitTestResult::SettingsToggle; r.index = 31; return r;
-                }
+                // Customization: the update card is removed, so its buttons and
+                // the automatic-check switch no longer take hits.
             } else if (vm.settings_page == 5 || vm.settings_page == 8) {
                 const int store_target = HitTestSettingsStore(lay, vm, x, y);
                 if (store_target >= 0) {

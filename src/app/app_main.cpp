@@ -253,6 +253,8 @@ bool TestAiBroker() {
 #include <imm.h>
 #include "duplicate_scan.h"
 #include "shell_tag_menu.h"
+#include "quick_look_mode.h"
+#include "quick_look_verb.h"
 #include "shell_tag_com.h"
 #include "shell_tag_audit.h"
 #include "hang_watch.h"
@@ -952,11 +954,11 @@ static app::WindowSessionSnapshot CaptureSessionWindow(AppState& w) {
     }
     snap.layout = CaptureWindowLayout(w);
     RememberLayoutFocus(w);
-    snap.active_layout_tab = static_cast<int>(w.window_tabs.active);
-    for (const auto& group : w.window_tabs.tab_groups)
-        snap.tab_groups.push_back({group.id, group.name, group.color_rgb, group.collapsed});
-    for (const auto& layout : w.window_tabs.items)
-        if (layout) snap.layout_tabs.push_back(app::CaptureLayoutTab(*layout));
+    // Customization: closing the Pulse window closes its tabs. Tabs, groups and
+    // the active layout tab are therefore never written to the session file, so
+    // the next launch starts from the default location instead of reopening
+    // every tab that was open before.
+    snap.active_layout_tab = 0;
     snap.identity = w.identity;
     return snap;
 }
@@ -973,14 +975,12 @@ static app::SessionSnapshot CaptureWindowSession(AppState& requested, HWND reque
         snap.maximized = (wp.showCmd == SW_SHOWMAXIMIZED);
     }
     snap.dark = s.darkMode;
-    app::Tab* tab = ActiveTab(s);
-    if (tab) snap.active_path = tab->current_path;
+    // Customization: the remembered folder goes away with the tabs, so the next
+    // launch uses the configured default location (one fresh tab).
     RememberLayoutFocus(s);
-    snap.active_layout_tab = static_cast<int>(s.window_tabs.active);
-    for (const auto& group : s.window_tabs.tab_groups)
-        snap.tab_groups.push_back({group.id, group.name, group.color_rgb, group.collapsed});
-    for (const auto& layout : s.window_tabs.items)
-        snap.layout_tabs.push_back(app::CaptureLayoutTab(*layout));
+    // Customization: keep the live window's tabs out of the session as well (see
+    // CaptureSessionWindow) — closing the window is meant to close its tabs.
+    snap.active_layout_tab = 0;
     snap.tray = s.tray;
     snap.undo_snapshot = s.ops.UndoJsonSnapshot();
     snap.sidebar_collapsed = static_cast<int>(s.sidebarCollapsedMask);
@@ -997,15 +997,10 @@ static app::SessionSnapshot CaptureWindowSession(AppState& requested, HWND reque
     snap.windows.push_back(CaptureSessionWindow(s));
     snap.windows.front().window_rect = snap.window_rect;
     snap.windows.front().maximized = snap.maximized;
-    app::ForEachWindowSharingCore(s, [&](AppState& window) {
-        if (&window != &s && window.hwnd && !window.window_tabs.items.empty())
-            snap.windows.push_back(CaptureSessionWindow(window));
-    });
-    for (const auto& pending : s.core.pending_session_windows) snap.windows.push_back(pending);
+    // Customization: tabs are not persisted, so only this window is written.
+    // Writing the other windows would make them reopen as empty windows, and
+    // closed windows are not carried across a restart either.
     snap.focused_window = 0;
-    // M7f: closed windows survive a restart (the writer keeps the newest).
-    for (const auto& closed : s.core.closed_windows.Items())
-        snap.closed_windows.push_back(app::ClosedWindowToSession(closed));
     return snap;
 }
 
@@ -2746,6 +2741,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             }
             if (pulse::TickSidebarPeek(*s, now)) dirty = true;
             TickShellTagMenu(*s, now);
+            // File Explorer's 快速预览 verb follows the setting like the tag menu.
+            TickQuickLookVerb(s->appPrefs.shell_quick_look, s->appPrefs.persist, now);
             // A hidden tag launch whose window the user opened meanwhile.
             if (!ShellTagHeadlessLaunch()) StartDeferredServices(*s);
             if (s->detailsPreviewFoldStart) {
@@ -4602,6 +4599,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         OleUninitialize();
         return result;
     }
+    if (__argc == 3 && wcscmp(__wargv[1], L"--quick-look") == 0) {
+        // Desktop Quick Look: the File Explorer verb opens one preview window
+        // and exits. Runs before the single-instance coordinator so a running
+        // Pulse does not swallow the request.
+        l10n::Initialize(hInstance, L"system");
+        const int result = app::RunQuickLookMode(__wargv[2]);
+        OleUninitialize();
+        return result;
+    }
     // Settings > 增强包 > 下载源 applies to every download from the start
     // (packs and Pulse's own update); Settings re-applies it on change.
     pulse::app::SetUpdateSource(static_cast<pulse::app::UpdateSource>(pulse::packs::LoadPackSettings().download_source));
@@ -4677,20 +4683,20 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     // Load previous session before parsing overrides.
     app::SessionSnapshot session;
     if ((!state.isolatedTest || state.isolatedTestPersist) && app::LoadSession(session)) {
-        state.session_path = session.active_path;
-        state.session_layout_tabs = std::move(session.layout_tabs);
-        state.session_tab_groups = std::move(session.tab_groups);
-        state.session_active_layout_tab = session.active_layout_tab;
+        // Customization: tabs are not restored. Only the window-independent parts
+        // of the session survive (sidebar, details pane, theme, tray, undo).
+        state.session_path.clear();
+        state.session_layout_tabs.clear();
+        state.session_tab_groups.clear();
+        state.session_active_layout_tab = 0;
         // Session v8 (M4d): the single-window fields above are the focused
         // window; the others open after the first window is shown.
         if (session.focused_window >= 0 && session.focused_window < static_cast<int>(session.windows.size()))
             state.identity = session.windows[static_cast<size_t>(session.focused_window)].identity;  // M7c
-        for (size_t i = 0; i < session.windows.size(); ++i)
-            if (static_cast<int>(i) != session.focused_window)
-                state.core.pending_session_windows.push_back(std::move(session.windows[i]));
-        // M7f: Ctrl+Shift+T and the overview can still bring these back.
-        for (const auto& closed : session.closed_windows)
-            state.core.closed_windows.Push(app::ClosedWindowFromSession(closed, ++state.core.close_seq));
+        // Customization: other windows of the previous session are not reopened,
+        // because their tabs are gone and they would show up empty.
+        // Customization: closed windows are not carried across a restart either —
+        // closing the window is meant to close everything it had open.
         state.tray = session.tray;
         state.darkMode = session.dark;
         state.sidebarCollapsedMask = static_cast<uint32_t>(session.sidebar_collapsed);

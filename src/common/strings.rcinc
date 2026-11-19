@@ -5140,6 +5140,7 @@ BEGIN
     IDS_SETUP_END_RETRY "结束进程并重试"
     IDS_SETUP_END_CONFIRM "将结束列表中可核验的占用进程，未保存的内容可能丢失。请先保存工作。是否继续？"
     IDS_SETUP_END_FAILED "部分进程未能结束，请查看安装日志或手动退出后重试。"
+    IDS_QUICK_LOOK_DESC "在资源管理器右键文件或文件夹即可打开快速预览，不必先打开 Pulse。"
 END
 
 LANGUAGE 0x09, 0x01
@@ -10279,6 +10280,7 @@ BEGIN
     IDS_SETUP_END_RETRY "End processes and retry"
     IDS_SETUP_END_CONFIRM "End the verified processes in this list? Unsaved work may be lost. Save your work before continuing."
     IDS_SETUP_END_FAILED "Some processes could not be ended. Check the setup log or quit them manually and retry."
+    IDS_QUICK_LOOK_DESC "Right-click a file or folder in File Explorer to preview it without opening Pulse first."
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

@@ -41,7 +41,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR arguments, int show) {
     for (int i = 1; argv && i < argc; ++i)
         if (wcscmp(argv[i], L"--ai") == 0 || wcscmp(argv[i], L"--mcp") == 0 || wcscmp(argv[i], L"--mcp-stdio") == 0 ||
             wcscmp(argv[i], L"--seed-shell-verbs") == 0 || wcscmp(argv[i], L"--shot") == 0 ||
-            wcscmp(argv[i], L"--selftest") == 0 || wcscmp(argv[i], L"--test-instance") == 0) wait = true;
+            wcscmp(argv[i], L"--selftest") == 0 || wcscmp(argv[i], L"--test-instance") == 0 ||
+            wcscmp(argv[i], L"--quick-look") == 0) wait = true;
     const auto fast = !wait ? pulse::app::TryWinEFastEntry(argc, argv,
         [] { return pulse::app::SingleInstanceCoordinator::FindPrimaryEndpoint().has_value(); },
         [] { pulse::app::SingleInstanceCoordinator existing;

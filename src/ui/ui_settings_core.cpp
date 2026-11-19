@@ -480,6 +480,13 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
             fluent::ControlState state{};state.checked=vm.settings_shell_tags;state.hovered=IsHovered(vm,H::SettingsToggle,21);
             painter_.DrawSwitch(D2D1::RectF(r.right-60*scale_,r.top+16*scale_,r.right-16*scale_,r.top+48*scale_),L"",state);
         }
+        {
+            // 快速预览 verb: right-click a file or folder in File Explorer.
+            const auto r=lay.quick_look_row;
+            label(r,l10n::Get(I::QuickPreview),l10n::Get(I::QuickLookDesc),L"\xE8EC",r.right-72*scale_,(r.bottom-r.top)/scale_-47);
+            fluent::ControlState state{};state.checked=vm.settings_shell_quick_look;state.hovered=IsHovered(vm,H::SettingsToggle,12);
+            painter_.DrawSwitch(D2D1::RectF(r.right-60*scale_,r.top+16*scale_,r.right-16*scale_,r.top+48*scale_),L"",state);
+        }
         label(lay.startup_restore_row,l10n::Get(I::StartupRestoreTitle),L"",L"\xE7A7",(lay.startup_restore_button.top>lay.startup_restore_row.top+40*scale_ ? lay.startup_restore_row.right-16*scale_ : lay.startup_restore_button.left-20*scale_));
         painter_.DrawWrappedCaption(l10n::Get(I::StartupRestoreDesc),D2D1::Point2F(lay.startup_restore_row.left+54*scale_,lay.startup_restore_row.top+36*scale_),(lay.startup_restore_button.top>lay.startup_restore_row.top+40*scale_ ? lay.startup_restore_row.right-54*scale_ : lay.startup_restore_button.left-20*scale_)-lay.startup_restore_row.left-54*scale_,theme.text_secondary);
         button(lay.startup_restore_button,l10n::Get(I::StartupRestoreAction),H::SettingsDialogManagement,15,false,

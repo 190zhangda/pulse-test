@@ -114,9 +114,11 @@ void CleanupPulseData(const std::wstring& index_path) {
     Log(L"Removed Pulse settings, caches and index data");
 }
 
-// File Explorer "Pulse tags" submenu (shell_tag_menu.cpp) and its dot icons.
+// File Explorer "Pulse tags" submenu (shell_tag_menu.cpp), the 快速预览 verb
+// (quick_look_verb.cpp) and the tag dot icons.
 void DeleteShellTagMenu() {
     for (const wchar_t* key : {L"Software\\Classes\\*\\shell\\PulseTags", L"Software\\Classes\\Directory\\shell\\PulseTags",
+                               L"Software\\Classes\\*\\shell\\PulseQuickLook", L"Software\\Classes\\Directory\\shell\\PulseQuickLook",
                                L"Software\\Classes\\CLSID\\{A2D41CF7-62E1-49F4-BCE9-3624D44FB779}"})
     {
         RegDeleteTreeW(HKEY_CURRENT_USER, key);

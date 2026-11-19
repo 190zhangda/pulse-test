@@ -100,48 +100,30 @@ void TickUpdates(AppState& state, unsigned long long now) {
         state.next_update_progress_paint = now + 100;
         InvalidateRect(state.hwnd, nullptr, FALSE);
     }
-    if (!state.whatsNewVersion.empty() && now >= state.whatsNewAt &&
-        IsWindowVisible(state.hwnd) && !IsIconic(state.hwnd)) {
-        wchar_t title[160]{};
-        swprintf_s(title, l10n::Get(l10n::StringId::UpdatedTitleFormat).c_str(),
-                   state.whatsNewVersion.c_str());
-        state.notification_toast.Show(state.hwnd, title, l10n::Get(l10n::StringId::UpdatedClick),
-                                      false, WM_SHOW_RELEASE_NOTES);
-        state.whatsNewVersion.clear();
-    }
+    // Customization: the "updated, click for release notes" toast is removed
+    // together with the release-notes card.
     // 备份与迁移: what this start applied, once the window shows.
     if (!state.shot.active && IsWindowVisible(state.hwnd) && !IsIconic(state.hwnd))
         ShowSettingsTransferStartupToast(state);
     TickPackUpdates(state, now);
-    if (state.shot.active || !app::UpdateChecker::Enabled() || !state.appPrefs.auto_check_updates ||
-        now < state.next_update_check) return;
-    if (state.update_installer.Progress().active() || state.update_checker.checking()) return;
-    state.next_update_check = now + kCheckInterval;
-    CheckForUpdates(state);
+    // Customization: software-update checking and the update toasts are removed.
+    (void)now;
 }
 
 void NoteRunningVersion(AppState& state) {
     auto& prefs = state.appPrefs;
     if (!prefs.persist || state.shot.active || state.menushot) return;
     if (prefs.last_seen_version == PULSE_VERSION_STRING) return;
-    // A fresh install has no app.json yet; only upgrades get the toast.
-    if (prefs.had_file) {
-        state.whatsNewVersion = PULSE_VERSION_STRING;
-        state.whatsNewAt = GetTickCount64() + 2500;
-    }
+    // The release-note card and its "what's new" toast are removed, so the
+    // version is recorded without showing anything.
     prefs.last_seen_version = PULSE_VERSION_STRING;
     prefs.Save();
 }
 
 void ShowReleaseNotes(AppState& state) {
+    // Customization: the release-notes card is removed; opening settings keeps
+    // the request harmless (the About page simply has no notes section).
     OpenSettingsTab(state, 3);
-    state.settingsReleaseExpanded = 0;
-    const auto vm = BuildVm(state, false);
-    const float w = static_cast<float>(state.compositor.Width());
-    const float h = static_cast<float>(state.compositor.Height());
-    state.settings.SetScroll(
-        state.renderer.SettingsDestinationOffset(vm, static_cast<int>(l10n::StringId::ReleaseNotes), w, h),
-        state.renderer.SettingsMaxScroll(vm, w, h));
     InvalidateRect(state.hwnd, nullptr, FALSE);
 }
 
@@ -161,16 +143,11 @@ void InstallUpdate(AppState& state) {
 void CompleteUpdateCheck(AppState& state) {
     app::UpdateResult result;
     if (!state.update_checker.TakeResult(result)) return;
+    // Customization: update checking is disabled (TickUpdates no longer starts
+    // checks and the Settings card is gone); keep the result bookkeeping for
+    // any pack-update path, but never surface a toast.
     state.update_result = std::move(result);
     state.update_result_ready = true;
-    if (state.update_result.update_available && state.notified_update_version != state.update_result.version) {
-        state.notified_update_version = state.update_result.version;
-        wchar_t title[160]{};
-        swprintf_s(title, l10n::Get(l10n::StringId::UpdateAvailableFormat).c_str(),
-            state.update_result.version.c_str());
-        state.notification_toast.Show(state.hwnd, title,
-            l10n::Get(l10n::StringId::UpdateClickToInstall), true, WM_UPDATE_INSTALL);
-    }
     InvalidateRect(state.hwnd, nullptr, FALSE);
 }
 
