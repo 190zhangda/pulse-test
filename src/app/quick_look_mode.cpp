@@ -29,6 +29,7 @@ constexpr UINT kQuickLookWatchIntervalMs = 120;
 
 struct QuickLookHost {
     ui::QuickPreviewWindow* preview = nullptr;
+    ULONGLONG shown_at = 0;
     bool done = false;
 };
 
@@ -52,7 +53,11 @@ LRESULT CALLBACK HostProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
         return 0;
     case WM_TIMER:
         // Esc and the close button hide the preview without telling the owner.
-        if (host && host->preview && !host->preview->visible()) host->done = true;
+        // The grace period covers the first show, which happens asynchronously.
+        if (host && host->preview && !host->preview->visible() &&
+            GetTickCount64() - host->shown_at > 1000) {
+            host->done = true;
+        }
         return 0;
     case WM_CLOSE:
         if (host) host->done = true;
@@ -165,6 +170,7 @@ int RunQuickLookMode(const wchar_t* path) {
             // safe_mode stays off so Office and PDF previews use their hosted
             // handlers; without a command message the window shows no file verbs.
             preview.Show(MakeItem(target, data), colors.dark, effect, /*safe_mode=*/false);
+            host.shown_at = GetTickCount64();
             SetTimer(owner, kQuickLookWatchTimer, kQuickLookWatchIntervalMs, nullptr);
             MSG msg{};
             while (!host.done && GetMessageW(&msg, nullptr, 0, 0) > 0) {

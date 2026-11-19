@@ -2742,7 +2742,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (pulse::TickSidebarPeek(*s, now)) dirty = true;
             TickShellTagMenu(*s, now);
             // File Explorer's 快速预览 verb follows the setting like the tag menu.
-            TickQuickLookVerb(s->appPrefs.shell_quick_look, s->appPrefs.persist, now);
+            app::TickQuickLookVerb(s->appPrefs.shell_quick_look, s->appPrefs.persist, now);
             // A hidden tag launch whose window the user opened meanwhile.
             if (!ShellTagHeadlessLaunch()) StartDeferredServices(*s);
             if (s->detailsPreviewFoldStart) {

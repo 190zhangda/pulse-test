@@ -80,9 +80,9 @@ bool RemoveQuickLookVerb(const QuickLookRegistryApi& api) {
         // The command subkey has to go first: SHDeleteKeyW refuses a tree that
         // still has children.
         api.delete_key(api.root, (std::wstring(key) + L"\\command").c_str(), 0, 0);
-        const bool removed = api.delete_key(api.root, key, 0, 0) == ERROR_SUCCESS;
+        const LSTATUS status = api.delete_key(api.root, key, 0, 0);
         // A missing key means the verb was never installed; that is success.
-        ok = (removed || GetLastError() == ERROR_FILE_NOT_FOUND) && ok;
+        ok = (status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND) && ok;
     }
     return ok;
 }
