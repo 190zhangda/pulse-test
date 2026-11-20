@@ -29,6 +29,7 @@ namespace pulse::app { class RecycleShellWatch; class ExtensionStoreController; 
 #include "duplicate_scan.h"
 #include "explorer_window_takeover.h"
 #include "win_e_hotkey.h"
+#include "quick_look_hotkey.h"
 #include "external_open.h"
 #include "external_open_notice.h"
 #include "folder_sizes.h"
@@ -228,6 +229,8 @@ struct AppCore {
     std::vector<app::ShellWindowEntry> shell_windows_published;
     std::unique_ptr<app::ExplorerWindowTakeover> explorer_takeover;   // experimental (B站 #1 2b)
     std::unique_ptr<app::WinEHotkey> win_e_hotkey;
+    // Space bar preview in File Explorer and on the desktop (quick_look_hotkey.h).
+    std::unique_ptr<app::QuickLookHotkey> quick_look_hotkey;
 
     // Cut state mirrored into list rows (ui.md §5.2 rule 6: 55% opacity).
     std::vector<std::wstring> cutPaths;

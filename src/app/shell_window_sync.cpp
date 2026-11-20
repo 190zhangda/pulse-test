@@ -53,6 +53,13 @@ void SyncExplorerTakeover(AppState& s) {
     if (win_e_enabled && !s.core.win_e_hotkey)
         s.core.win_e_hotkey = std::make_unique<app::WinEHotkey>(s.single_instance, ServiceWindow(s), WM_OPEN_EXTERNAL);
     else if (!win_e_enabled && s.core.win_e_hotkey) s.core.win_e_hotkey.reset();
+    // Space in Explorer / on the desktop opens the Quick Look window; the same
+    // preference also publishes the right-click verb (quick_look_verb.cpp).
+    const bool quick_look_space_enabled = ShellIntegrationAllowed(s, L"PULSE_TEST_QUICK_LOOK_SPACE") &&
+        s.appPrefs.shell_quick_look && s.single_instance.OwnsEndpoint(ServiceWindow(s)) && !s.core.exiting;
+    if (quick_look_space_enabled && !s.core.quick_look_hotkey)
+        s.core.quick_look_hotkey = std::make_unique<app::QuickLookHotkey>();
+    else if (!quick_look_space_enabled && s.core.quick_look_hotkey) s.core.quick_look_hotkey.reset();
     app::HandoffDiagnostics::sink.store(+[](uint64_t id, app::HandoffPhase phase, uint64_t code,
                                           uint64_t detail, uint64_t elapsed) noexcept {
         diagnostics::runtime::Event("explorer_handoff", {{"request_id", id},
@@ -169,6 +176,7 @@ void SyncShellWindows(AppState& s) {
 
 void StopShellWindows(AppState& s) {
     s.core.win_e_hotkey.reset();
+    s.core.quick_look_hotkey.reset();
     if (s.explorer_takeover) s.explorer_takeover->Stop();
     s.explorer_takeover.reset();
     if (s.shell_windows) s.shell_windows->Stop();
