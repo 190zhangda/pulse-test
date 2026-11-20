@@ -432,16 +432,26 @@ struct DesktopGrid {
     int cell_height = 0;
 };
 
+// The per-monitor DPI helper is missing from the SDK this tree targets (the rest
+// of the code base looks it up at run time for the same reason), so it is
+// resolved dynamically here too. The metrics below are reported at 96 DPI and
+// must be scaled by the desktop's DPI to match the cells the shell lays out.
+UINT DesktopDpi() {
+    using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+    static const auto get_dpi = reinterpret_cast<GetDpiForWindowFn>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
+    const UINT dpi = get_dpi ? get_dpi(GetDesktopWindow()) : 0;
+    return dpi ? dpi : 96;
+}
+
 DesktopGrid MakeDesktopGrid(int count, const RECT& area) {
     DesktopGrid grid;
     if (count <= 0) return grid;
-    int cell_width = 0;
-    int cell_height = 0;
-    if (HWND probe = GetDesktopWindow()) {
-        const UINT dpi = GetDpiForWindow(probe);
-        cell_width = GetSystemMetricsForDpi(SM_CXICONSPACING, dpi);
-        cell_height = GetSystemMetricsForDpi(SM_CYICONSPACING, dpi);
-    }
+    // ICONSPACING is the cell pitch the shell uses for the desktop's icons; the
+    // registry stores it in twips, which is why the metric is scaled by the DPI.
+    const int dpi = static_cast<int>(DesktopDpi());
+    int cell_width = MulDiv(GetSystemMetrics(SM_CXICONSPACING), dpi, 96);
+    int cell_height = MulDiv(GetSystemMetrics(SM_CYICONSPACING), dpi, 96);
     if (cell_width <= 0) cell_width = 96;
     if (cell_height <= 0) cell_height = 124;
     const int width = area.right - area.left;
@@ -465,6 +475,9 @@ DesktopGrid MakeDesktopGrid(int count, const RECT& area) {
     grid.placed = true;
     return grid;
 }
+
+// Defined below, once the shell view helpers it needs are in scope.
+std::wstring PathAtPoint(HWND view_window, const ComPtr<IFolderView2>& view, POINT cursor);
 
 // Desktop item under the cursor. An icon organiser may leave the classic list
 // control empty, so nothing may be asked of that control here: the accessibility
@@ -578,45 +591,12 @@ std::wstring PathAtPoint(HWND view_window, const ComPtr<IFolderView2>& view, POI
 }
 
 // Desktop item under the cursor. An icon organiser draws the icons itself, so
-// the classic list control reports no item at the point and the accessibility
-// tree publishes no rectangle either: the point is first looked up in the
-// accessibility tree (a shell that does publish rectangles answers directly),
-// then in the cell grid rebuilt from the desktop icon metrics.
+// the point is named through the accessibility tree, the cell grid and finally
+// the shell view, in that order of reliability.
 std::wstring DesktopPathAtPoint(POINT cursor) {
     const std::wstring folder = DesktopFolderPath();
     if (folder.empty()) return {};
-    ComPtr<IUIAutomation> automation;
-    if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation))) &&
-        automation) {
-        ComPtr<IUIAutomationElement> found;
-        if (SUCCEEDED(automation->ElementFromPoint(cursor, &found)) && found) {
-            ComPtr<IUIAutomationTreeWalker> walker;
-            if (SUCCEEDED(automation->get_ControlViewWalker(&walker)) && walker) {
-                ComPtr<IUIAutomationElement> current = found;
-                for (int depth = 0; current && depth < 12; ++depth) {
-                    CONTROLTYPEID type = 0;
-                    if (SUCCEEDED(current->get_CurrentControlType(&type)) && type == UIA_ListItemControlTypeId) {
-                        BSTR name = nullptr;
-                        if (SUCCEEDED(current->get_CurrentName(&name)) && name) {
-                            const std::wstring text(name);
-                            SysFreeString(name);
-                            if (const std::wstring path = ResolveDesktopName(folder, text); !path.empty()) return path;
-                        }
-                        break;
-                    }
-                    ComPtr<IUIAutomationElement> parent;
-                    if (FAILED(walker->GetParentElement(current.Get(), &parent)) || !parent) break;
-                    current = parent;
-                }
-            }
-        }
-    }
-    // The classic list control answers when the shell still fills it, which is
-    // the common case without an icon organiser installed.
-    const ShellView shell = FindView(GetDesktopWindow(), Surface::Desktop);
-    if (shell.folder && shell.window) {
-        if (std::wstring path = PathAtPoint(shell.window, shell.folder, cursor); !path.empty()) return path;
-    }
+    if (std::wstring named = PathAtPoint(nullptr, nullptr, cursor); !named.empty()) return named;
     return DesktopItemAtPoint(folder, cursor);
 }
 
