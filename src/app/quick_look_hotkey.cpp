@@ -270,10 +270,17 @@ bool QuickLookHotkey::Preview(HWND foreground) {
     if (surface == Surface::None) return false;
     const std::wstring path = SelectedPath(foreground, surface);
     if (path.empty()) return false;
-    // Space takes over from any hover preview so there is never a second window
-    // showing a different item.
+    // Any earlier preview (hover or a previous Space press) must be replaced:
+    // leaving several Quick Look windows alive is what made Space appear to show
+    // the file from a previous press instead of the one now selected.
     CloseHoverPreview();
-    if (LaunchPreview(path)) diagnostics::runtime::Event("quick_look_space", {{"previewed", 1}, {"error", 0}});
+    HANDLE process = nullptr;
+    if (!LaunchPreview(path, &process)) return false;
+    hover_process_ = process;
+    hover_path_ = path;
+    hover_shown_ = true;
+    hover_shown_at_ = GetTickCount64();
+    diagnostics::runtime::Event("quick_look_space", {{"previewed", 1}, {"error", 0}});
     return true;
 }
 
