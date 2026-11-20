@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <atomic>
 #include <cstdint>
+#include <string>
 
 namespace pulse::app {
 // Space bar preview for File Explorer and the desktop: with a selection in an
@@ -20,6 +21,8 @@ private:
     static DWORD WINAPI Thread(void* value);
     static LRESULT CALLBACK Keyboard(int code, WPARAM message, LPARAM data);
     bool Preview(HWND foreground);
+    void CheckHover();
+    void CloseHoverPreview();
     void ReinjectSpace();
     HANDLE thread_ = nullptr;
     std::atomic<DWORD> thread_id_{0};
@@ -31,6 +34,15 @@ private:
     // excluded either way, and normal runs never set the variable.
     bool accept_injected_ = false;
     bool reinjecting_ = false;
+    // Hover preview state, owned by the hook thread.
+    HANDLE hover_process_ = nullptr;
+    int hover_delay_ms_ = 500;
+    std::wstring hover_path_;
+    POINT hover_anchor_{0, 0};
+    ULONGLONG hover_moved_at_ = 0; // tick when the cursor entered the current item
+    ULONGLONG hover_shown_at_ = 0; // tick when the preview process was started
+    bool hover_pending_ = false;   // cursor settled on an item, delay running
+    bool hover_shown_ = false;     // a preview process is alive for that item
     inline static thread_local QuickLookHotkey* current_ = nullptr;
 };
 } // namespace pulse::app
