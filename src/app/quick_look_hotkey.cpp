@@ -12,7 +12,6 @@
 #include <wrl/client.h>
 
 #include <string>
-#include <vector>
 #include <cstdlib>
 #include <cwchar>
 #include <string.h>
@@ -339,171 +338,6 @@ std::wstring DesktopAccessibilityPath() {
     return selected;
 }
 
-// One desktop item as the accessibility tree publishes it: name, grid cell and
-// (when the shell fills the classic list control) its screen rectangle.
-struct DesktopItem {
-    std::wstring name;
-    int row = 0;
-    int column = 0;
-    int index = 0;
-    bool selected = false;
-    bool has_grid = false;
-    bool has_rect = false;
-    RECT bounds{};
-};
-
-bool ReadDesktopItems(const std::wstring& folder, std::vector<DesktopItem>& items) {
-    const HWND host = DesktopItemHost();
-    if (!host) return false;
-    ComPtr<IUIAutomation> automation;
-    if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation))) ||
-        !automation)
-        return false;
-    ComPtr<IUIAutomationElement> root;
-    if (FAILED(automation->ElementFromHandle(host, &root)) || !root) return false;
-    VARIANT list_item;
-    VariantInit(&list_item);
-    list_item.vt = VT_I4;
-    list_item.lVal = UIA_ListItemControlTypeId;
-    ComPtr<IUIAutomationCondition> condition;
-    if (FAILED(automation->CreatePropertyCondition(UIA_ControlTypePropertyId, list_item, &condition)) || !condition)
-        return false;
-    ComPtr<IUIAutomationElementArray> children;
-    if (FAILED(root->FindAll(TreeScope_Descendants, condition.Get(), &children)) || !children) return false;
-    int count = 0;
-    if (FAILED(children->get_Length(&count)) || count <= 0) return false;
-    items.reserve(static_cast<size_t>(count));
-    for (int i = 0; i < count; ++i) {
-        ComPtr<IUIAutomationElement> element;
-        if (FAILED(children->GetElement(i, &element)) || !element) continue;
-        BSTR raw_name = nullptr;
-        if (FAILED(element->get_CurrentName(&raw_name)) || !raw_name) continue;
-        DesktopItem item;
-        item.name = raw_name;
-        item.index = static_cast<int>(items.size());
-        SysFreeString(raw_name);
-        if (ResolveDesktopName(folder, item.name).empty()) continue;
-        // A shell that still fills its list control publishes a real rectangle,
-        // which is the truthful answer for "which icon is under the cursor".
-        // An icon organiser reports an empty (or inverted) one instead.
-        RECT bounds{};
-        if (SUCCEEDED(element->get_CurrentBoundingRectangle(&bounds)) && bounds.right > bounds.left &&
-            bounds.bottom > bounds.top && bounds.right < 32767 && bounds.bottom < 32767) {
-            item.bounds = bounds;
-            item.has_rect = true;
-        }
-        ComPtr<IUnknown> pattern;
-        if (SUCCEEDED(element->GetCurrentPattern(UIA_GridItemPatternId, &pattern)) && pattern) {
-            ComPtr<IUIAutomationGridItemPattern> grid;
-            if (SUCCEEDED(pattern.As(&grid)) && grid) {
-                int row = 0;
-                int column = 0;
-                if (SUCCEEDED(grid->get_CurrentRow(&row)) && SUCCEEDED(grid->get_CurrentColumn(&column))) {
-                    item.row = row;
-                    item.column = column;
-                    item.has_grid = true;
-                }
-            }
-        }
-        pattern.Reset();
-        if (SUCCEEDED(element->GetCurrentPattern(UIA_SelectionItemPatternId, &pattern)) && pattern) {
-            ComPtr<IUIAutomationSelectionItemPattern> selection;
-            if (SUCCEEDED(pattern.As(&selection)) && selection) {
-                BOOL selected = FALSE;
-                if (SUCCEEDED(selection->get_CurrentIsSelected(&selected))) item.selected = selected != FALSE;
-            }
-        }
-        items.push_back(std::move(item));
-    }
-    return !items.empty();
-}
-
-// Cells the user sees, in icon flow order. The desktop fills column by column:
-// the first item sits at the top left, the next ones go down that column and the
-// run continues in the next column to the right. Shell icons publish a rectangle
-// and never reach this grid; it only serves an icon organiser that draws the
-// icons itself and reports no geometry at all.
-struct DesktopGrid {
-    int columns = 1;
-    int rows = 1;
-    bool placed = false;
-    RECT origin{};
-    int cell_width = 0;
-    int cell_height = 0;
-};
-
-// The per-monitor DPI helper is missing from the SDK this tree targets (the rest
-// of the code base looks it up at run time for the same reason), so it is
-// resolved dynamically here too. The metrics below are reported at 96 DPI and
-// must be scaled by the desktop's DPI to match the cells the shell lays out.
-UINT DesktopDpi() {
-    using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
-    static const auto get_dpi = reinterpret_cast<GetDpiForWindowFn>(
-        GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
-    const UINT dpi = get_dpi ? get_dpi(GetDesktopWindow()) : 0;
-    return dpi ? dpi : 96;
-}
-
-DesktopGrid MakeDesktopGrid(int count, const RECT& area) {
-    DesktopGrid grid;
-    if (count <= 0) return grid;
-    // ICONSPACING is the cell pitch the shell nominally uses for desktop icons,
-    // but it is reported smaller than the cells the desktop actually lays out:
-    // the observed flow at 100% is about 95 px across and 123 px down, because a
-    // cell has to hold the icon plus its label. The metric is therefore used as a
-    // floor, with the observed pitch as the minimum.
-    const int dpi = static_cast<int>(DesktopDpi());
-    int cell_width = MulDiv(GetSystemMetrics(SM_CXICONSPACING), dpi, 96);
-    int cell_height = MulDiv(GetSystemMetrics(SM_CYICONSPACING), dpi, 96);
-    if (cell_width < MulDiv(95, dpi, 96)) cell_width = MulDiv(95, dpi, 96);
-    if (cell_height < MulDiv(123, dpi, 96)) cell_height = MulDiv(123, dpi, 96);
-    if (cell_width <= 0) cell_width = 96;
-    if (cell_height <= 0) cell_height = 124;
-    const int width = area.right - area.left;
-    const int height = area.bottom - area.top;
-    grid.cell_width = cell_width;
-    grid.cell_height = cell_height;
-    int rows = height / cell_height;
-    if (rows < 1) rows = 1;
-    if (rows > count) rows = count;
-    int columns = (count + rows - 1) / rows;
-    if (width > 0 && columns * cell_width > width) {
-        const int fit = width / cell_width;
-        if (fit >= 1) columns = fit;
-        if (columns < 1) columns = 1;
-        rows = (count + columns - 1) / columns;
-        if (rows < 1) rows = 1;
-    }
-    grid.columns = columns;
-    grid.rows = rows;
-    grid.origin = area;
-    grid.placed = true;
-    return grid;
-}
-
-// Desktop item under the cursor, by cell when the point is not named by the
-// accessibility tree. An icon organiser leaves the classic list control empty, so
-// the only geometry left is the column-major cell grid the desktop lays out.
-std::wstring DesktopItemAtPoint(const std::wstring& folder, POINT cursor) {
-    std::vector<DesktopItem> items;
-    if (!ReadDesktopItems(folder, items)) return {};
-    RECT area{};
-    area.right = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    area.bottom = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-    if (area.right <= 0 || area.bottom <= 0) return {};
-    const int count = static_cast<int>(items.size());
-    const DesktopGrid grid = MakeDesktopGrid(count, area);
-    if (!grid.placed) return {};
-    const int column = (cursor.x - area.left) / grid.cell_width;
-    const int row = (cursor.y - area.top) / grid.cell_height;
-    if (column < 0 || row < 0 || column >= grid.columns || row >= grid.rows) return {};
-    const int cell = column * grid.rows + row;
-    if (cell >= count) return {};
-    const DesktopItem& item = items[static_cast<size_t>(cell)];
-    if (const std::wstring path = ResolveDesktopName(folder, item.name); !path.empty()) return path;
-    return {};
-}
-
 // Desktop item path through the shell's own folder view. The running shell
 // still registers that view on most systems, which is the cheapest answer; a
 // substitute desktop may not register it at all.
@@ -532,72 +366,53 @@ std::wstring DesktopShellViewPath() {
     return SelectedPathOf(view);
 }
 
-// Desktop item for a Space press: the accessibility tree first, because the
-// desktop's shell view is what an icon organiser replaces.
-std::wstring DesktopItemPath() {
-    if (std::wstring path = DesktopAccessibilityPath(); !path.empty()) return path;
-    if (std::wstring path = DesktopShellViewPath(); !path.empty()) return path;
-    // Last resort: the desktop folder's own view answers GetFocusedItem even on a
-    // machine where the running shell registers no shell window for the desktop.
+// Item of a shell view that a preview should show, as a filesystem path.
+// LVM_HITTEST cannot be used to answer "which item is under the cursor": the
+// list-view messages live in the WM_USER range, which the system does not marshal
+// across processes, so sending one from here writes into the shell's address
+// space and answers garbage. Some shells replace the item list altogether and
+// publish no geometry, which leaves no truthful point-to-item mapping at all. The
+// item the view has focused - the one a click leaves marked - is therefore what a
+// hover preview shows.
+std::wstring PathAtPoint(HWND view_window, const ComPtr<IFolderView2>& view, POINT cursor) {
+    (void)view_window;
+    (void)cursor;
+    if (!view) return {};
+    if (std::wstring focused = FocusedPath(view); !focused.empty()) return focused;
+    return SelectedPathOf(view);
+}
+
+// Read the desktop's selected item inside the shell's own folder view. A shell
+// that replaces the item list can still answer here, and the focus it keeps is
+// the one the user sees.
+std::wstring DesktopFolderViewPath() {
     ComPtr<IShellFolder> folder;
     if (FAILED(SHGetDesktopFolder(folder.GetAddressOf())) || !folder) return {};
     ComPtr<IShellView> shell_view;
     if (FAILED(folder->CreateViewObject(GetDesktopWindow(), IID_PPV_ARGS(&shell_view))) || !shell_view) return {};
     ComPtr<IFolderView2> view;
     if (FAILED(shell_view.As(&view)) || !view) return {};
-    if (std::wstring path = FocusedPath(view); !path.empty()) return path;
-    return SelectedPathOf(view);
+    return PathAtPoint(nullptr, view, POINT{});
 }
 
-
-// Filesystem path of the item under the cursor, or empty when the cursor is on
-// empty space, a non-file item, or our own preview window.
-// LVM_HITTEST cannot be used here: the list-view messages live in the WM_USER
-// range, which the system does not marshal across processes, so sending one from
-// this process writes into the shell's address space and answers garbage. The
-// accessibility tree publishes the same rectangle for every icon and is safe to
-// query, so the point is resolved there instead: the list item under the cursor
-// is named and that name is resolved inside the view's folder.
-std::wstring PathAtPoint(HWND view_window, const ComPtr<IFolderView2>& view, POINT cursor) {
-    (void)view_window;
-    (void)view;
-    ComPtr<IUIAutomation> automation;
-    if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation))) ||
-        !automation)
-        return {};
-    ComPtr<IUIAutomationElement> found;
-    if (FAILED(automation->ElementFromPoint(cursor, &found)) || !found) return {};
-    ComPtr<IUIAutomationTreeWalker> walker;
-    if (FAILED(automation->get_ControlViewWalker(&walker)) || !walker) return {};
-    ComPtr<IUIAutomationElement> current = found;
-    for (int depth = 0; current && depth < 12; ++depth) {
-        CONTROLTYPEID type = 0;
-        if (SUCCEEDED(current->get_CurrentControlType(&type)) && type == UIA_ListItemControlTypeId) {
-            BSTR name = nullptr;
-            if (FAILED(current->get_CurrentName(&name)) || !name) return {};
-            const std::wstring text(name);
-            SysFreeString(name);
-            // Whatever folder the point belongs to: the shell's desktop folder
-            // here, since that is the only place this hook navigates.
-            const std::wstring folder = DesktopFolderPath();
-            if (folder.empty()) return {};
-            return ResolveDesktopName(folder, text);
-        }
-        ComPtr<IUIAutomationElement> parent;
-        if (FAILED(walker->GetParentElement(current.Get(), &parent)) || !parent) break;
-        current = parent;
+// Desktop item for a preview: the accessibility tree first, because the desktop's
+// item list is exactly what an icon organiser replaces. Every tier is a different
+// source of the same selection, so the answer never depends on a coordinate.
+std::wstring DesktopSpacePath() {
+    if (std::wstring path = DesktopAccessibilityPath(); !path.empty()) {
+        diagnostics::runtime::Event("quick_look_desktop", {{"tier", 1}});
+        return path;
     }
+    if (std::wstring path = DesktopShellViewPath(); !path.empty()) {
+        diagnostics::runtime::Event("quick_look_desktop", {{"tier", 2}});
+        return path;
+    }
+    if (std::wstring path = DesktopFolderViewPath(); !path.empty()) {
+        diagnostics::runtime::Event("quick_look_desktop", {{"tier", 3}});
+        return path;
+    }
+    diagnostics::runtime::Event("quick_look_desktop", {{"tier", 0}});
     return {};
-}
-
-// Desktop item under the cursor. An icon organiser draws the icons itself, so
-// the point is named through the accessibility tree, the cell grid and finally
-// the shell view, in that order of reliability.
-std::wstring DesktopPathAtPoint(POINT cursor) {
-    const std::wstring folder = DesktopFolderPath();
-    if (folder.empty()) return {};
-    if (std::wstring named = PathAtPoint(nullptr, nullptr, cursor); !named.empty()) return named;
-    return DesktopItemAtPoint(folder, cursor);
 }
 
 int ReadHoverDelayMs() {
@@ -608,13 +423,11 @@ int ReadHoverDelayMs() {
 // nothing is selected or the selection has no filesystem location (a virtual
 // folder such as This PC).
 std::wstring SelectedPath(HWND foreground, Surface surface) {
+    // The desktop is answered by its selection, never by a shell view: an icon
+    // organiser leaves that view without items while the selection stays readable.
+    if (surface == Surface::Desktop) return DesktopSpacePath();
     ShellView shell = FindView(foreground, surface);
-    if (!shell.folder) {
-        // Desktop without a usable shell view (see FindView): the shell windows
-        // collection is still the only thing that knows which icon is focused.
-        if (surface == Surface::Desktop) return DesktopItemPath();
-        return {};
-    }
+    if (!shell.folder) return {};
     if (std::wstring focused = FocusedPath(shell.folder); !focused.empty()) return focused;
     return SelectedPathOf(shell.folder);
 }
@@ -755,33 +568,21 @@ void QuickLookHotkey::CheckHover() {
         CloseHoverPreview();
         return;
     }
+    // Hover previews only where a point can be mapped onto an item truthfully. An
+    // icon organiser replaces the desktop's item list and publishes no geometry, so
+    // the desktop offers Space only; its selection is read there instead.
+    if (surface == Surface::Desktop) {
+        CloseHoverPreview();
+        return;
+    }
     const HWND root = GetAncestor(under, GA_ROOT);
     const ShellView shell = FindView(root, surface);
-    // The desktop may have no usable shell view (an icon organiser replaces it),
-    // so its item under the cursor comes from the accessibility tree instead.
-    // That query walks a UI Automation tree, so its answer is reused while the
-    // cursor stays within a few pixels of where it was asked.
-    std::wstring path;
-    if (surface == Surface::Desktop && (!shell.folder || !shell.window)) {
-        const bool same_point = std::abs(cursor.x - hover_query_point_.x) <= 4 &&
-            std::abs(cursor.y - hover_query_point_.y) <= 4;
-        if (same_point) {
-            path = hover_query_path_;
-        } else {
-            path = DesktopPathAtPoint(cursor);
-            hover_query_point_ = cursor;
-            hover_query_path_ = path;
-        }
-    } else {
-        path = PathAtPoint(shell.window, shell.folder, cursor);
-        hover_query_path_.clear();
-    }
+    const std::wstring path = PathAtPoint(shell.window, shell.folder, POINT{cursor.x, cursor.y});
     if (path.empty()) {
         CloseHoverPreview();
-        // Nothing under the cursor is expected most of the time (empty desktop,
-        // gap between icons), so this only records which surface was searched.
-        if (surface == Surface::Desktop)
-            diagnostics::runtime::Event("quick_look_hover_miss", {{"desktop", 1}});
+        // Nothing under the cursor is expected most of the time (empty space, gap
+        // between rows), so this only records that the surface was searched.
+        diagnostics::runtime::Event("quick_look_hover_miss", {{"surface", static_cast<int>(surface)}});
         return;
     }
 
