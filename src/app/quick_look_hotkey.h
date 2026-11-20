@@ -26,6 +26,11 @@ private:
     std::atomic<bool> stopping_{false}, active_{false};
     HHOOK hook_ = nullptr;
     bool space_down_ = false, swallowed_ = false;
+    // Diagnostics only: PULSE_TEST_QUICK_LOOK_KEYS=1 lets injected keys through
+    // so an automated run can drive the Space path. Our own reinjection is
+    // excluded either way, and normal runs never set the variable.
+    bool accept_injected_ = false;
+    bool reinjecting_ = false;
     inline static thread_local QuickLookHotkey* current_ = nullptr;
 };
 } // namespace pulse::app

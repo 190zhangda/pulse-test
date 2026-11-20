@@ -144,6 +144,7 @@ bool LaunchPreview(const std::wstring& path) {
 } // namespace
 
 QuickLookHotkey::QuickLookHotkey() {
+    accept_injected_ = GetEnvironmentVariableW(L"PULSE_TEST_QUICK_LOOK_KEYS", nullptr, 0) > 0;
     thread_ = CreateThread(nullptr, 0, Thread, this, 0, nullptr);
     if (!thread_) diagnostics::runtime::Event("quick_look_space", {{"enabled", 0}, {"error", GetLastError()}});
 }
@@ -174,11 +175,13 @@ bool QuickLookHotkey::Preview(HWND foreground) {
 // Marked injected, so the hook passes it straight through: a Space we swallowed
 // that turned out to have nothing to preview still reaches Explorer.
 void QuickLookHotkey::ReinjectSpace() {
+    reinjecting_ = true;
     INPUT input[2]{};
     input[0].type = input[1].type = INPUT_KEYBOARD;
     input[0].ki.wVk = input[1].ki.wVk = VK_SPACE;
     input[1].ki.dwFlags = KEYEVENTF_KEYUP;
     SendInput(2, input, sizeof(INPUT));
+    reinjecting_ = false;
 }
 
 DWORD WINAPI QuickLookHotkey::Thread(void* value) {
@@ -221,7 +224,11 @@ LRESULT CALLBACK QuickLookHotkey::Keyboard(int code, WPARAM message, LPARAM data
     if (code != HC_ACTION || !self || self->stopping_) return CallNextHookEx(nullptr, code, message, data);
     const auto& key = *reinterpret_cast<const KBDLLHOOKSTRUCT*>(data);
     if (key.vkCode != VK_SPACE) return CallNextHookEx(nullptr, code, message, data);
-    if (key.flags & LLKHF_INJECTED) return CallNextHookEx(nullptr, code, message, data);
+    // Injected keys are not the user's: automation, an on-screen keyboard or our
+    // own ReinjectSpace. The diagnostics variable opts them in so a scripted run
+    // can drive the same path; the reinjection above always stays out.
+    if ((key.flags & LLKHF_INJECTED) && !(self->accept_injected_ && !self->reinjecting_))
+        return CallNextHookEx(nullptr, code, message, data);
     const bool pressed = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
     const bool released = message == WM_KEYUP || message == WM_SYSKEYUP;
     if (!pressed && !released) return CallNextHookEx(nullptr, code, message, data);
