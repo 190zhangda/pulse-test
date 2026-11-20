@@ -493,7 +493,8 @@ bool QuickLookHotkey::Preview(HWND foreground) {
         // A swallowed Space with nothing to preview is the one case a bug report
         // cannot describe from the outside, so record which surface failed.
         diagnostics::runtime::Event("quick_look_miss",
-            {{"surface", static_cast<uint64_t>(surface)}, {"desktop", surface == Surface::Desktop ? 1u : 0u}});
+            {{"surface", static_cast<uint64_t>(static_cast<int>(surface))},
+                {"desktop", surface == Surface::Desktop ? 1u : 0u}});
         return false;
     }
     // Any earlier preview (hover or a previous Space press) must be replaced:
@@ -582,7 +583,8 @@ void QuickLookHotkey::CheckHover() {
         CloseHoverPreview();
         // Nothing under the cursor is expected most of the time (empty space, gap
         // between rows), so this only records that the surface was searched.
-        diagnostics::runtime::Event("quick_look_hover_miss", {{"surface", static_cast<int>(surface)}});
+        diagnostics::runtime::Event("quick_look_hover_miss",
+            {{"surface", static_cast<uint64_t>(static_cast<int>(surface))}});
         return;
     }
 
