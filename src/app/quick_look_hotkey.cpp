@@ -447,11 +447,16 @@ UINT DesktopDpi() {
 DesktopGrid MakeDesktopGrid(int count, const RECT& area) {
     DesktopGrid grid;
     if (count <= 0) return grid;
-    // ICONSPACING is the cell pitch the shell uses for the desktop's icons; the
-    // registry stores it in twips, which is why the metric is scaled by the DPI.
+    // ICONSPACING is the cell pitch the shell nominally uses for desktop icons,
+    // but it is reported smaller than the cells the desktop actually lays out:
+    // the observed flow at 100% is about 95 px across and 123 px down, because a
+    // cell has to hold the icon plus its label. The metric is therefore used as a
+    // floor, with the observed pitch as the minimum.
     const int dpi = static_cast<int>(DesktopDpi());
     int cell_width = MulDiv(GetSystemMetrics(SM_CXICONSPACING), dpi, 96);
     int cell_height = MulDiv(GetSystemMetrics(SM_CYICONSPACING), dpi, 96);
+    if (cell_width < MulDiv(95, dpi, 96)) cell_width = MulDiv(95, dpi, 96);
+    if (cell_height < MulDiv(123, dpi, 96)) cell_height = MulDiv(123, dpi, 96);
     if (cell_width <= 0) cell_width = 96;
     if (cell_height <= 0) cell_height = 124;
     const int width = area.right - area.left;
