@@ -481,15 +481,10 @@ DesktopGrid MakeDesktopGrid(int count, const RECT& area) {
     return grid;
 }
 
-// Defined below, once the shell view helpers it needs are in scope.
-std::wstring PathAtPoint(HWND view_window, const ComPtr<IFolderView2>& view, POINT cursor);
-
-// Desktop item under the cursor. An icon organiser may leave the classic list
-// control empty, so nothing may be asked of that control here: the accessibility
-// tree names the icon at the point when it publishes rectangles at all, and the
-// column-major cell grid the desktop uses is the fallback when it does not.
+// Desktop item under the cursor, by cell when the point is not named by the
+// accessibility tree. An icon organiser leaves the classic list control empty, so
+// the only geometry left is the column-major cell grid the desktop lays out.
 std::wstring DesktopItemAtPoint(const std::wstring& folder, POINT cursor) {
-    if (std::wstring named = PathAtPoint(nullptr, nullptr, cursor); !named.empty()) return named;
     std::vector<DesktopItem> items;
     if (!ReadDesktopItems(folder, items)) return {};
     RECT area{};
