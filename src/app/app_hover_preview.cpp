@@ -68,11 +68,23 @@ bool PointerFree(const AppState& s) {
         !s.stripHScrolling && !s.splitterDragging && !s.detailsPanelResizing;
 }
 
+// The row parts that still count as the row itself: the pointer on a row's own
+// star, tag dot, check box or "more" button is a hover over that row's card.
+bool OnListRow(const AppState& s) {
+    const int region = s.hoverRegion;
+    return region == static_cast<int>(ui::HitTestResult::Row) ||
+        region == static_cast<int>(ui::HitTestResult::RowStar) ||
+        region == static_cast<int>(ui::HitTestResult::RowTagDot) ||
+        region == static_cast<int>(ui::HitTestResult::RowFolderSize) ||
+        region == static_cast<int>(ui::HitTestResult::RowNewTab) ||
+        region == static_cast<int>(ui::HitTestResult::RowMore) ||
+        region == static_cast<int>(ui::HitTestResult::RowCheck);
+}
+
 bool CanShow(AppState& s) {
     return s.hwnd && HoverPreviewOn(s) && GetForegroundWindow() == s.hwnd && !IsIconic(s.hwnd) &&
         !s.shot.active && !s.menushot && !s.quickPreview.visible() && !s.context_menu.menu_open() &&
-        s.renameIndex < 0 && PointerFree(s) &&
-        s.hoverRegion == static_cast<int>(ui::HitTestResult::Row);
+        s.renameIndex < 0 && PointerFree(s) && s.hoverRow >= 0 && OnListRow(s);
 }
 
 app::Tab* TabAtSlot(AppState& s, int slot) {

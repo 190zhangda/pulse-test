@@ -43,6 +43,10 @@ private:
     ULONGLONG hover_shown_at_ = 0; // tick when the preview process was started
     bool hover_pending_ = false;   // cursor settled on an item, delay running
     bool hover_shown_ = false;     // a preview process is alive for that item
+    // The desktop answers through the accessibility tree, which is far too slow
+    // to query on every poll; the answer is reused while the cursor stays put.
+    POINT hover_query_point_{0, 0};
+    std::wstring hover_query_path_;
     inline static thread_local QuickLookHotkey* current_ = nullptr;
 };
 } // namespace pulse::app

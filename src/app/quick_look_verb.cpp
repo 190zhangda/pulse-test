@@ -6,9 +6,14 @@
 
 namespace pulse::app {
 namespace {
+// The three background keys put the same verb on an empty patch of a folder, so
+// Explorer and the desktop offer it on their backgrounds as well as on items.
 constexpr const wchar_t* kVerbKeys[] = {
     L"Software\\Classes\\*\\shell\\PulseQuickLook",
     L"Software\\Classes\\Directory\\shell\\PulseQuickLook",
+    L"Software\\Classes\\DesktopBackground\\shell\\PulseQuickLook",
+    L"Software\\Classes\\Directory\\Background\\shell\\PulseQuickLook",
+    L"Software\\Classes\\AllFilesystemObjects\\shell\\PulseQuickLook",
 };
 constexpr ULONGLONG kSyncPeriodMs = 2000;
 

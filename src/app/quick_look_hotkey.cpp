@@ -8,11 +8,13 @@
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <shobjidl.h>
+#include <uiautomation.h>
 #include <wrl/client.h>
 
 #include <string>
 #include <cstdlib>
 #include <cwchar>
+#include <string.h>
 
 using Microsoft::WRL::ComPtr;
 
@@ -29,6 +31,16 @@ constexpr UINT kHoverPollMs = 100;
 
 enum class Surface { None, Explorer, Desktop };
 
+// Folder windows of the desktop shell. A third party desktop organiser (which
+// draws the icons in its own window and leaves the shell's list view empty) is
+// recognised by this class name as well, so both the icon layer it draws and
+// the shell's own list view count as the desktop.
+bool IsDesktopBackgroundClass(const wchar_t* name) {
+    return name && (wcscmp(name, L"Progman") == 0 || wcscmp(name, L"WorkerW") == 0 ||
+        wcsstr(name, L"DefView") != nullptr || wcsstr(name, L"SHELLDLL_") != nullptr ||
+        wcsstr(name, L"Coodesker") != nullptr);
+}
+
 Surface Classify(HWND window) {
     if (!window) return Surface::None;
     const HWND root = GetAncestor(window, GA_ROOT);
@@ -36,7 +48,21 @@ Surface Classify(HWND window) {
     wchar_t name[64]{};
     if (!GetClassNameW(root, name, ARRAYSIZE(name))) return Surface::None;
     if (wcscmp(name, L"CabinetWClass") == 0 || wcscmp(name, L"ExploreWClass") == 0) return Surface::Explorer;
-    if (wcscmp(name, L"Progman") == 0 || wcscmp(name, L"WorkerW") == 0) return Surface::Desktop;
+    if (IsDesktopBackgroundClass(name)) return Surface::Desktop;
+    return Surface::None;
+}
+
+// The desktop's own window is not always the root of what the cursor is on: an
+// icon organiser may draw into a window of its own that sits in the desktop's
+// process, so the ancestors and then the owning process are consulted too.
+Surface ClassifyAt(HWND window) {
+    if (const Surface direct = Classify(window); direct != Surface::None) return direct;
+    for (HWND current = window; current; current = GetAncestor(current, GA_PARENT)) {
+        wchar_t name[64]{};
+        if (!GetClassNameW(current, name, ARRAYSIZE(name))) break;
+        if (IsDesktopBackgroundClass(name)) return Surface::Desktop;
+        if (wcscmp(name, L"CabinetWClass") == 0 || wcscmp(name, L"ExploreWClass") == 0) return Surface::Explorer;
+    }
     return Surface::None;
 }
 
@@ -63,6 +89,7 @@ bool FocusIsTextInput(HWND foreground) {
 struct ShellView {
     ComPtr<IFolderView2> folder;
     HWND window = nullptr; // IShellView::GetWindow, hosts the item list control
+    std::wstring path;     // the folder itself, when no shell view could be had
 };
 
 ShellView ViewOf(const ComPtr<IWebBrowser2>& browser) {
@@ -102,7 +129,18 @@ ShellView FindView(HWND foreground, Surface surface) {
                 if (view.folder) return view;
             }
         }
-        return {};
+        // FindWindowSW answers RPC_E_* on machines where the desktop's browser
+        // is not registered with the running shell (or is owned by an organiser's
+        // substitute). Without the view the item under the cursor cannot be named
+        // at all, so fall back to a listing of the desktop folder itself.
+        ShellView fallback;
+        PWSTR folder = nullptr;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &folder)) && folder) {
+            fallback.window = nullptr;
+            fallback.path = folder;
+            CoTaskMemFree(folder);
+        }
+        return fallback;
     }
     const HWND root = GetAncestor(foreground, GA_ROOT);
     long count = 0;
@@ -166,6 +204,175 @@ std::wstring FocusedPath(const ComPtr<IFolderView2>& view) {
     return PathForIndex(view, index);
 }
 
+// First selected item of the view, in view order. When the view reports no
+// focused item this is the item Space acts on.
+std::wstring SelectedPathOf(const ComPtr<IFolderView2>& view) {
+    ComPtr<IShellItemArray> items;
+    if (!view || view->GetSelection(FALSE, &items) != S_OK || !items) return {};
+    DWORD selected = 0;
+    if (FAILED(items->GetCount(&selected)) || selected == 0) return {};
+    ComPtr<IShellItem> first;
+    if (FAILED(items->GetItemAt(0, &first)) || !first) return {};
+    PWSTR path = nullptr;
+    if (FAILED(first->GetDisplayName(SIGDN_FILESYSPATH, &path)) || !path) return {};
+    std::wstring result(path);
+    CoTaskMemFree(path);
+    return result;
+}
+
+// The desktop folder itself (never a virtual folder such as This PC).
+std::wstring DesktopFolderPath() {
+    PWSTR folder = nullptr;
+    std::wstring result;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &folder)) && folder) result = folder;
+    if (folder) CoTaskMemFree(folder);
+    return result;
+}
+
+// Window that publishes the desktop's icons to the accessibility tree. The
+// classic def view keeps its items in a SysListView32, which an icon organiser
+// leaves empty; the icons the user sees live under the DirectUIHWND that the
+// shell also creates inside a second def view. That one is preferred, so the
+// search walks every desktop def view for a DirectUIHWND instead of taking the
+// first one it meets.
+BOOL CALLBACK FindDirectUIHost(HWND window, LPARAM found) {
+    wchar_t name[64]{};
+    if (!GetClassNameW(window, name, ARRAYSIZE(name))) return TRUE;
+    if (wcscmp(name, L"DirectUIHWND") == 0) {
+        *reinterpret_cast<HWND*>(found) = window;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+HWND DirectUIHostUnder(HWND parent) {
+    HWND found = nullptr;
+    EnumChildWindows(parent, FindDirectUIHost, reinterpret_cast<LPARAM>(&found));
+    return found;
+}
+
+HWND DesktopItemHost() {
+    HWND def_view = nullptr;
+    for (HWND worker = FindWindowExW(nullptr, nullptr, L"WorkerW", nullptr); worker;
+         worker = FindWindowExW(nullptr, worker, L"WorkerW", nullptr)) {
+        for (HWND view = FindWindowExW(worker, nullptr, L"SHELLDLL_DefView", nullptr); view;
+             view = FindWindowExW(worker, view, L"SHELLDLL_DefView", nullptr)) {
+            if (!def_view) def_view = view;
+            if (HWND list = DirectUIHostUnder(view)) return list;
+        }
+    }
+    if (HWND view = FindWindowExW(nullptr, nullptr, L"SHELLDLL_DefView", nullptr)) {
+        if (!def_view) def_view = view;
+        if (HWND list = DirectUIHostUnder(view)) return list;
+    }
+    return def_view;
+}
+
+// Accessibility names drop a known extension ("notes" for notes.txt), so the
+// name is matched against the folder's entries as a whole and as a stem.
+std::wstring ResolveDesktopName(const std::wstring& folder, const std::wstring& name) {
+    if (name.empty()) return {};
+    const std::wstring direct = folder + L"\\" + name;
+    if (GetFileAttributesW(direct.c_str()) != INVALID_FILE_ATTRIBUTES) return direct;
+    WIN32_FIND_DATAW entry{};
+    HANDLE find = FindFirstFileW((folder + L"\\*").c_str(), &entry);
+    if (find == INVALID_HANDLE_VALUE) return {};
+    std::wstring result;
+    do {
+        if (entry.cFileName[0] == L'.' && (entry.cFileName[1] == 0 || entry.cFileName[1] == L'.')) continue;
+        std::wstring candidate = entry.cFileName;
+        const size_t dot = candidate.find_last_of(L'.');
+        const std::wstring stem = dot == std::wstring::npos ? candidate : candidate.substr(0, dot);
+        if (_wcsicmp(candidate.c_str(), name.c_str()) == 0 || _wcsicmp(stem.c_str(), name.c_str()) == 0) {
+            result = folder + L"\\" + candidate;
+            break;
+        }
+    } while (FindNextFileW(find, &entry));
+    FindClose(find);
+    return result;
+}
+
+// The desktop's selected icon name, read from the shell's own accessibility
+// tree. An icon organiser may draw the icons in its own window and leave the
+// classic list control empty, but the shell still publishes each desktop item
+// with its selected state, which is the only reliable answer for which icon
+// Space should preview.
+std::wstring DesktopAccessibilityPath() {
+    const HWND host = DesktopItemHost();
+    if (!host) return {};
+    const std::wstring folder = DesktopFolderPath();
+    if (folder.empty()) return {};
+    ComPtr<IUIAutomation> automation;
+    if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation))) ||
+        !automation)
+        return {};
+    ComPtr<IUIAutomationElement> root;
+    if (FAILED(automation->ElementFromHandle(host, &root)) || !root) return {};
+    VARIANT list_item;
+    VariantInit(&list_item);
+    list_item.vt = VT_I4;
+    list_item.lVal = UIA_ListItemControlTypeId;
+    ComPtr<IUIAutomationCondition> condition;
+    if (FAILED(automation->CreatePropertyCondition(UIA_ControlTypePropertyId, list_item, &condition)) || !condition)
+        return {};
+    ComPtr<IUIAutomationElementArray> items;
+    if (FAILED(root->FindAll(TreeScope_Descendants, condition.Get(), &items)) || !items) return {};
+    int count = 0;
+    if (FAILED(items->get_Length(&count)) || count <= 0) return {};
+    for (int i = 0; i < count; ++i) {
+        ComPtr<IUIAutomationElement> item;
+        if (FAILED(items->GetElement(i, &item)) || !item) continue;
+        ComPtr<IUnknown> raw;
+        if (FAILED(item->GetCurrentPattern(UIA_SelectionItemPatternId, &raw)) || !raw) continue;
+        ComPtr<IUIAutomationSelectionItemPattern> selection;
+        if (FAILED(raw.As(&selection)) || !selection) continue;
+        BOOL selected = FALSE;
+        if (FAILED(selection->get_CurrentIsSelected(&selected)) || !selected) continue;
+        BSTR name = nullptr;
+        if (FAILED(item->get_CurrentName(&name)) || !name) continue;
+        const std::wstring text(name);
+        SysFreeString(name);
+        if (const std::wstring path = ResolveDesktopName(folder, text); !path.empty()) return path;
+    }
+    return {};
+}
+
+// Desktop item path through the shell's own folder view. The running shell
+// still registers that view on most systems, which is the cheapest answer; a
+// substitute desktop may not register it at all.
+std::wstring DesktopShellViewPath() {
+    ComPtr<IShellWindows> windows;
+    if (FAILED(CoCreateInstance(CLSID_ShellWindows, nullptr, CLSCTX_LOCAL_SERVER, IID_PPV_ARGS(&windows))) || !windows)
+        return {};
+    VARIANT location;
+    VariantInit(&location);
+    VARIANT root;
+    VariantInit(&root);
+    long hwnd = 0;
+    ComPtr<IDispatch> dispatch;
+    if (FAILED(windows->FindWindowSW(&location, &root, SWC_DESKTOP, &hwnd, SWFO_NEEDDISPATCH, &dispatch)) || !dispatch)
+        return {};
+    ComPtr<IServiceProvider> provider;
+    ComPtr<IShellBrowser> browser;
+    ComPtr<IShellView> shell_view;
+    ComPtr<IFolderView2> view;
+    if (FAILED(dispatch.As(&provider)) || !provider) return {};
+    if (FAILED(provider->QueryService(SID_STopLevelBrowser, IID_PPV_ARGS(&browser))) || !browser) return {};
+    if (FAILED(browser->QueryActiveShellView(&shell_view)) || !shell_view) return {};
+    if (FAILED(shell_view.As(&view)) || !view) return {};
+    std::wstring path = FocusedPath(view);
+    if (!path.empty()) return path;
+    return SelectedPathOf(view);
+}
+
+// Desktop item for a Space press: the shell view when the running shell still
+// exposes one, otherwise the accessibility tree above.
+std::wstring DesktopItemPath() {
+    if (std::wstring path = DesktopShellViewPath(); !path.empty()) return path;
+    return DesktopAccessibilityPath();
+}
+
+
 // List-view control that hosts the shell view's items (SysListView32 on most
 // builds). LVM_HITTEST gives us the item under the cursor for hover preview.
 HWND ItemListWindow(HWND view_window) {
@@ -190,6 +397,46 @@ std::wstring PathAtPoint(HWND view_window, const ComPtr<IFolderView2>& view, POI
     return PathForIndex(view, hit.iItem);
 }
 
+// Desktop item under the cursor. An icon organiser draws the icons itself, so
+// the classic list control may report no item at the point; the shell's
+// accessibility tree still names the item under the cursor, which is what the
+// user is pointing at.
+std::wstring DesktopPathAtPoint(POINT cursor) {
+    const std::wstring folder = DesktopFolderPath();
+    if (folder.empty()) return {};
+    ComPtr<IUIAutomation> automation;
+    if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation))) &&
+        automation) {
+        ComPtr<IUIAutomationElement> found;
+        if (SUCCEEDED(automation->ElementFromPoint(cursor, &found)) && found) {
+            ComPtr<IUIAutomationTreeWalker> walker;
+            if (SUCCEEDED(automation->get_ControlViewWalker(&walker)) && walker) {
+                ComPtr<IUIAutomationElement> current = found;
+                for (int depth = 0; current && depth < 12; ++depth) {
+                    CONTROLTYPEID type = 0;
+                    if (SUCCEEDED(current->get_CurrentControlType(&type)) && type == UIA_ListItemControlTypeId) {
+                        BSTR name = nullptr;
+                        if (SUCCEEDED(current->get_CurrentName(&name)) && name) {
+                            const std::wstring text(name);
+                            SysFreeString(name);
+                            if (const std::wstring path = ResolveDesktopName(folder, text); !path.empty()) return path;
+                        }
+                        break;
+                    }
+                    ComPtr<IUIAutomationElement> parent;
+                    if (FAILED(walker->GetParentElement(current.Get(), &parent)) || !parent) break;
+                    current = parent;
+                }
+            }
+        }
+    }
+    // Nothing in the accessibility tree (an older shell, or the point is on the
+    // wallpaper): fall back to the classic list control.
+    const ShellView shell = FindView(GetDesktopWindow(), Surface::Desktop);
+    if (shell.folder && shell.window) return PathAtPoint(shell.window, shell.folder, cursor);
+    return {};
+}
+
 int ReadHoverDelayMs() {
     return NormalizeHoverPreviewDelay(ReadUserPickerAppearanceReadOnly().snapshot.hover_preview_delay_ms);
 }
@@ -199,19 +446,14 @@ int ReadHoverDelayMs() {
 // folder such as This PC).
 std::wstring SelectedPath(HWND foreground, Surface surface) {
     ShellView shell = FindView(foreground, surface);
-    if (!shell.folder) return {};
+    if (!shell.folder) {
+        // Desktop without a usable shell view (see FindView): the shell windows
+        // collection is still the only thing that knows which icon is focused.
+        if (surface == Surface::Desktop) return DesktopItemPath();
+        return {};
+    }
     if (std::wstring focused = FocusedPath(shell.folder); !focused.empty()) return focused;
-    ComPtr<IShellItemArray> items;
-    if (shell.folder->GetSelection(FALSE, &items) != S_OK || !items) return {};
-    DWORD selected = 0;
-    if (FAILED(items->GetCount(&selected)) || selected == 0) return {};
-    ComPtr<IShellItem> first;
-    if (FAILED(items->GetItemAt(0, &first)) || !first) return {};
-    PWSTR path = nullptr;
-    if (FAILED(first->GetDisplayName(SIGDN_FILESYSPATH, &path)) || !path) return {};
-    std::wstring result(path);
-    CoTaskMemFree(path);
-    return result;
+    return SelectedPathOf(shell.folder);
 }
 
 bool LaunchPreview(const std::wstring& path, HANDLE* process_out = nullptr) {
@@ -266,7 +508,9 @@ void QuickLookHotkey::Stop() {
 }
 
 bool QuickLookHotkey::Preview(HWND foreground) {
-    const Surface surface = Classify(foreground);
+    // ClassifyAt also recognises the desktop's icon layer when an icon organiser
+    // draws it in a window of its own.
+    const Surface surface = ClassifyAt(foreground);
     if (surface == Surface::None) return false;
     const std::wstring path = SelectedPath(foreground, surface);
     if (path.empty()) return false;
@@ -337,18 +581,32 @@ void QuickLookHotkey::CheckHover() {
     // that case; the pointer moving back onto the shell is what dismisses it.
     if (IsQuickLookWindow(under)) return;
 
-    const Surface surface = Classify(under);
+    const Surface surface = ClassifyAt(under);
     if (surface == Surface::None) {
         CloseHoverPreview();
         return;
     }
     const HWND root = GetAncestor(under, GA_ROOT);
     const ShellView shell = FindView(root, surface);
-    if (!shell.folder || !shell.window) {
-        CloseHoverPreview();
-        return;
+    // The desktop may have no usable shell view (an icon organiser replaces it),
+    // so its item under the cursor comes from the accessibility tree instead.
+    // That query walks a UI Automation tree, so its answer is reused while the
+    // cursor stays within a few pixels of where it was asked.
+    std::wstring path;
+    if (surface == Surface::Desktop && (!shell.folder || !shell.window)) {
+        const bool same_point = std::abs(cursor.x - hover_query_point_.x) <= 4 &&
+            std::abs(cursor.y - hover_query_point_.y) <= 4;
+        if (same_point) {
+            path = hover_query_path_;
+        } else {
+            path = DesktopPathAtPoint(cursor);
+            hover_query_point_ = cursor;
+            hover_query_path_ = path;
+        }
+    } else {
+        path = PathAtPoint(shell.window, shell.folder, cursor);
+        hover_query_path_.clear();
     }
-    const std::wstring path = PathAtPoint(shell.window, shell.folder, cursor);
     if (path.empty()) {
         CloseHoverPreview();
         return;
@@ -456,7 +714,7 @@ LRESULT CALLBACK QuickLookHotkey::Keyboard(int code, WPARAM message, LPARAM data
     // Everything else keeps Explorer's own Space behaviour (rename, type ahead).
     if (ModifierDown()) return CallNextHookEx(nullptr, code, message, data);
     const HWND foreground = GetForegroundWindow();
-    if (Classify(foreground) == Surface::None) return CallNextHookEx(nullptr, code, message, data);
+    if (ClassifyAt(foreground) == Surface::None) return CallNextHookEx(nullptr, code, message, data);
     if (FocusIsTextInput(foreground)) return CallNextHookEx(nullptr, code, message, data);
     const auto id = self->thread_id_.load();
     if (!id) return CallNextHookEx(nullptr, code, message, data);

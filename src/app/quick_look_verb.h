@@ -1,7 +1,8 @@
 #pragma once
-// File Explorer "快速预览" verb: right-click a file or folder and preview it
-// with Quick Look without opening Pulse first (quick_look_mode.cpp handles the
-// command line it launches).
+// Explorer "快速预览" verb: right-click a file, a folder, the desktop or an
+// empty patch of a folder and preview it with Quick Look without opening Pulse
+// first (quick_look_mode.cpp handles the command line it launches; a folder
+// opens as a listing).
 //
 // The verb lives in HKCU only and is owned by this application: Pulse installs
 // it while Settings > 启动与集成 > 快速预览 is on and removes it again when the
@@ -18,8 +19,8 @@ struct QuickLookRegistryApi {
     decltype(&RegQueryValueExW) query_value = ::RegQueryValueExW;
     HKEY root = HKEY_CURRENT_USER;
 };
-// Writes both verbs (files and directories). exe is the stable entry point the
-// verb launches; title is the menu text.
+// Writes every verb (files, folders and the two backgrounds). exe is the stable
+// entry point the verb launches; title is the menu text.
 bool InstallQuickLookVerb(const std::wstring& exe, const std::wstring& title,
                           const QuickLookRegistryApi& api = {});
 bool RemoveQuickLookVerb(const QuickLookRegistryApi& api = {});

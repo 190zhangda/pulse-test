@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.25)
+cmake_minimum_required(VERSION 3.25)
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/version.txt" PULSE_VERSION LIMIT_COUNT 1)
 project(Pulse VERSION ${PULSE_VERSION} LANGUAGES C CXX)
 
@@ -708,6 +708,7 @@ target_link_options(pulse PRIVATE /MAP)
     target_link_libraries(pulse PRIVATE
         d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore ole32 shell32 uuid comctl32 advapi32 shlwapi version windowscodecs gdi32 netapi32 mpr bcrypt pulse_crash_reporter)
     target_link_libraries(pulse PRIVATE propsys oleaut32)  # shell_window_registry.cpp
+    target_link_libraries(pulse PRIVATE uiautomationcore)  # quick_look_hotkey.cpp: desktop icon under Space
     target_link_libraries(pulse PRIVATE cfgmgr32)  # device_shell.cpp: portable device presence
     target_link_libraries(pulse PRIVATE winhttp crypt32 secur32)
     # System DLLs the first frame never calls: delay-loading them takes them
