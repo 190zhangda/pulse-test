@@ -8,7 +8,6 @@
 #include <chrono>
 // fs_enum.cpp
 #include "fs_enum.h"
-#include "ftp_url.h"
 #include "drive_label.h"
 #include "bitlocker_volume.h"
 #include "bounded_enumeration.h"
@@ -129,10 +128,32 @@ static void InitNtApi() {
     });
 }
 
+namespace {
+// "ftp://" in any case: fs/ftp_url.cpp is not part of this library, so the test
+// is spelled out here rather than pulled in as a call.
+bool StartsWithFtpScheme(const std::wstring& path) {
+    const wchar_t scheme[] = L"ftp://";
+    if (path.size() < 6) return false;
+    for (size_t i = 0; i < 6; ++i) {
+        const wchar_t c = path[i];
+        const wchar_t folded = (c >= L'A' && c <= L'Z') ? static_cast<wchar_t>(c - L'A' + L'a') : c;
+        if (folded != scheme[i]) return false;
+    }
+    return true;
+}
+}  // namespace
+
 bool IsVirtualPath(const std::wstring& path) {
     // ftp:// folders live outside Win32: the browser lists them through
-    // FtpRegistry, so nothing here may hand them to FindFirstFileW.
-    return path.starts_with(L"pulse:") || IsFtpUrl(path);
+    // FtpRegistry, so nothing here may hand them to FindFirstFileW. The scheme
+    // test is spelled out instead of calling IsFtpUrl so this library keeps no
+    // dependency on the ftp client translation unit.
+    return path.starts_with(L"pulse:") || StartsWithFtpScheme(path);
+}
+
+bool IsUncPath(const std::wstring& path) {
+    return path.starts_with(L"\\\\?\\UNC\\") ||
+           (path.starts_with(L"\\\\") && !path.starts_with(L"\\\\?\\"));
 }
 
 std::wstring NormalizePath(std::wstring path) {
