@@ -1,6 +1,5 @@
 #include "single_instance_coordinator.h"
 #include "../common/runtime_log.h"
-#include "../fs/fs_enum.h"
 #include "open_request_pipe.h"
 #include "explorer_submission_port.h"
 
@@ -201,6 +200,24 @@ void SingleInstanceCoordinator::Release() {
     ReleaseMutex(mutex_); CloseHandle(mutex_); mutex_ = nullptr;
 }
 
+namespace {
+
+// A folder outside Win32 (pulse:, ftp://) has to survive a launch as it was
+// typed. Spelled out here because the launcher does not link fs_enum.cpp.
+bool IsVirtualLaunchPath(const std::wstring& path) {
+    if (path.starts_with(L"pulse:")) return true;
+    const wchar_t scheme[] = L"ftp://";
+    if (path.size() < 6) return false;
+    for (size_t i = 0; i < 6; ++i) {
+        wchar_t c = path[i];
+        if (c >= L'A' && c <= L'Z') c = static_cast<wchar_t>(c - L'A' + L'a');
+        if (c != scheme[i]) return false;
+    }
+    return true;
+}
+
+}  // namespace
+
 bool SingleInstanceCoordinator::NormalizeLaunchPath(const std::wstring& input, std::wstring& output) {
     output.clear();
     if (input.find(L'\0') != std::wstring::npos || input.size() >= 32768) return false;
@@ -222,7 +239,7 @@ bool SingleInstanceCoordinator::NormalizeLaunchPath(const std::wstring& input, s
     if (path.empty()) { output.clear(); return true; }
     // A folder outside Win32 (ftp://, pulse:) has to survive as it was typed:
     // GetFullPathNameW would fold it into the launch directory.
-    if (fs::IsVirtualPath(path)) { output = path; return true; }
+    if (IsVirtualLaunchPath(path)) { output = path; return true; }
     std::replace(path.begin(), path.end(), L'/', L'\\');
     if (path.size() == 2 && path[1] == L':') path += L'\\';
     wchar_t absolute[32768]{};
