@@ -495,7 +495,8 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
 
     pulse::app::startup_trace::Mark("worker_sorted");
     res.snapshot = std::move(entries);
-    if (item.load_paths || fs::IsRecycleViewPath(item.path))
+    // An ftp:// folder has no Win32 identity to query.
+    if ((item.load_paths || fs::IsRecycleViewPath(item.path)) && !fs::IsFtpUrl(item.path))
         fs::QueryDirectoryIdentity(item.path, res.identity);
 
     // Timing output for large directories (visible in a debugger or ETW).
