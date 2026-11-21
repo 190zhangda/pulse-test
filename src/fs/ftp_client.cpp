@@ -631,6 +631,14 @@ FtpStatus FtpClient::List(const std::wstring& path, std::vector<FtpItem>& out,
             continue;
         }
 
+        if (reply.code == 226) {
+            // An empty folder on some servers: the completion arrives together
+            // with the preliminary reply, so the data connection carries
+            // nothing and there is no second reply to wait for.
+            closesocket(data);
+            break;
+        }
+
         bool aborted = false;
         for (;;) {
             if (cancelled && cancelled()) {
@@ -749,6 +757,13 @@ FtpStatus FtpClient::Download(const std::wstring& remote, const std::wstring& lo
     }
     uint64_t written = 0;
     bool failed = false;
+    if (reply.code == 226) {
+        // The server answered the whole transfer at once: there is no data to
+        // receive, and no second reply to wait for either.
+        closesocket(data);
+        CloseHandle(file);
+        return FtpStatus::Ok;
+    }
     for (;;) {
         if (cancelled && cancelled()) break;
         char chunk[kChunk];
