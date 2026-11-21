@@ -30,6 +30,12 @@ constexpr UINT kQuickLookWatchIntervalMs = 120;
 struct QuickLookHost {
     ui::QuickPreviewWindow* preview = nullptr;
     ULONGLONG shown_at = 0;
+    // Set once the preview has actually been on screen. Only a window that never
+    // made it is torn down by the watchdog; one that has is left alone, because
+    // composing the transparent owner can take it out of IsWindowVisible for a
+    // moment and the user would lose the preview they just asked for.
+    bool shown = false;
+    ULONGLONG hidden_at = 0;
     bool done = false;
 };
 
@@ -54,9 +60,21 @@ LRESULT CALLBACK HostProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
     case WM_TIMER:
         // Esc and the close button hide the preview without telling the owner.
         // The grace period covers the first show, which happens asynchronously.
-        if (host && host->preview && !host->preview->visible() &&
-            GetTickCount64() - host->shown_at > 1000) {
-            host->done = true;
+        if (host && host->preview) {
+            if (!host->preview->visible()) {
+                const ULONGLONG now = GetTickCount64();
+                if (!host->shown) {
+                    if (now - host->shown_at > 1000) host->done = true;
+                } else {
+                    // Closing through the window itself hides it and leaves the
+                    // process running; a second of continuous hiding ends it.
+                    if (host->hidden_at == 0) host->hidden_at = now;
+                    else if (now - host->hidden_at > 1000) host->done = true;
+                }
+            } else {
+                host->shown = true;
+                host->hidden_at = 0;
+            }
         }
         return 0;
     case WM_CLOSE:

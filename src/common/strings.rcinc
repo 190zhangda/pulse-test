@@ -5141,6 +5141,10 @@ BEGIN
     IDS_SETUP_END_CONFIRM "将结束列表中可核验的占用进程，未保存的内容可能丢失。请先保存工作。是否继续？"
     IDS_SETUP_END_FAILED "部分进程未能结束，请查看安装日志或手动退出后重试。"
     IDS_QUICK_LOOK_DESC "在资源管理器或桌面选中文件后按空格即可预览，右键菜单里也有快速预览；Pulse 在后台运行时生效。"
+    IDS_QUICK_LOOK_SPACE "空格预览"
+    IDS_QUICK_LOOK_SPACE_DESC "在资源管理器或桌面上选中项目后按空格即可预览"
+    IDS_QUICK_LOOK_HOVER "悬停预览"
+    IDS_QUICK_LOOK_HOVER_DESC "指针在文件上停留片刻后自动显示预览"
 END
 
 LANGUAGE 0x09, 0x01
@@ -10281,6 +10285,10 @@ BEGIN
     IDS_SETUP_END_CONFIRM "End the verified processes in this list? Unsaved work may be lost. Save your work before continuing."
     IDS_SETUP_END_FAILED "Some processes could not be ended. Check the setup log or quit them manually and retry."
     IDS_QUICK_LOOK_DESC "Select a file in File Explorer or on the desktop and press Space to preview it; the right-click menu offers it too. Works while Pulse runs in the background."
+    IDS_QUICK_LOOK_SPACE "Space preview"
+    IDS_QUICK_LOOK_SPACE_DESC "Select an item in File Explorer or on the desktop and press Space to preview it"
+    IDS_QUICK_LOOK_HOVER "Hover preview"
+    IDS_QUICK_LOOK_HOVER_DESC "Rest the pointer on a file for a moment and the preview appears on its own"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

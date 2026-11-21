@@ -67,6 +67,10 @@ void AppPrefs::ResetToDefaults() {
     integration_folders_compat = false;
     shell_tag_menu = false;
     shell_quick_look = false;
+    // Sub-switches of the row above: an older file has neither key, so both start
+    // out equal to the single switch, which is exactly what it used to mean.
+    shell_quick_look_space = false;
+    shell_quick_look_hover = false;
     verify_copies = false;
     show_status_performance = false;
     show_pinned_tab_names = true;
@@ -212,6 +216,10 @@ std::wstring AppPrefs::ToJson() const {
     out += shell_tag_menu ? L"true" : L"false";
     out += L",\n  \"shell_quick_look\":";
     out += shell_quick_look ? L"true" : L"false";
+    out += L",\n  \"shell_quick_look_space\":";
+    out += shell_quick_look_space ? L"true" : L"false";
+    out += L",\n  \"shell_quick_look_hover\":";
+    out += shell_quick_look_hover ? L"true" : L"false";
     out += L",\n  \"verify_copies\":";
     out += verify_copies ? L"true" : L"false";
     out += L",\n  \"show_status_performance\":";
@@ -554,6 +562,10 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     integration_recycle_bin = pulse::json::ExtractBool(json, L"integration_recycle_bin", !integration_configured);
     shell_tag_menu = pulse::json::ExtractBool(json, L"shell_tag_menu", false);
     shell_quick_look = pulse::json::ExtractBool(json, L"shell_quick_look", false);
+    // An older file has neither key: both halves stay on, which is what the single
+    // switch used to mean.
+    shell_quick_look_space = pulse::json::ExtractBool(json, L"shell_quick_look_space", true);
+    shell_quick_look_hover = pulse::json::ExtractBool(json, L"shell_quick_look_hover", true);
     verify_copies = pulse::json::ExtractBool(json, L"verify_copies", false);
     show_status_performance = pulse::json::ExtractBool(json, L"show_status_performance", false);
     show_pinned_tab_names = pulse::json::ExtractBool(json, L"show_pinned_tab_names", true);

@@ -524,6 +524,13 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 if (ContainsPt(lay.quick_look_row, x, y)) {
                     r.region = HitTestResult::SettingsToggle; r.index = 12; return r;
                 }
+                // The Space key and the hover card of Quick Look switch separately.
+                if (ContainsPt(lay.quick_look_space_row, x, y)) {
+                    r.region = HitTestResult::SettingsToggle; r.index = 13; return r;
+                }
+                if (ContainsPt(lay.quick_look_hover_row, x, y)) {
+                    r.region = HitTestResult::SettingsToggle; r.index = 14; return r;
+                }
                 for (int i = 0; i < 3; ++i) if (ContainsPt(lay.blank_click_choice[i], x, y)) {
                     r.region = HitTestResult::SettingsBlankClick; r.index = i; return r;
                 }

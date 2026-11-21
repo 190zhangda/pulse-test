@@ -1350,6 +1350,13 @@ void SettingsController::ToggleUi(int index) {
         // quick_look_verb.cpp installs/removes the HKCU verb on the next UI tick.
         prefs_->shell_quick_look = !prefs_->shell_quick_look;
         SaveAndApply(SettingsEffect::None);
+    } else if (index == 13) {
+        // shell_window_sync.cpp tells the running hook, so no restart is needed.
+        prefs_->shell_quick_look_space = !prefs_->shell_quick_look_space;
+        SaveAndApply(SettingsEffect::None);
+    } else if (index == 14) {
+        prefs_->shell_quick_look_hover = !prefs_->shell_quick_look_hover;
+        SaveAndApply(SettingsEffect::None);
     } else if (index == 8) {
         prefs_->change_tracking_enabled = !prefs_->change_tracking_enabled;
         SaveAndApply(SettingsEffect::ChangeTracking);

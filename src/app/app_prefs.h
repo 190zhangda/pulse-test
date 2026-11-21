@@ -53,7 +53,12 @@ struct AppPrefs {
     bool shell_tag_menu = false;    // File Explorer "Pulse tags" submenu (shell_tag_menu.cpp syncs HKCU)   // registry is the source of truth (not in app.json)
     // File Explorer "快速预览" verb (quick_look_verb.cpp syncs HKCU): preview a
     // file or folder with Quick Look without opening Pulse first.
-    bool shell_quick_look = false;
+    bool shell_quick_look = false;      // the right-click verb (quick_look_verb.cpp)
+    // The two halves of Quick Look in File Explorer have a switch each: Space on
+    // a selection, and the pointer resting on a row. quick_look_hotkey.cpp is
+    // started when either is on and is told which halves to serve.
+    bool shell_quick_look_space = true;
+    bool shell_quick_look_hover = true;
     bool verify_copies = false;
     bool show_status_performance = false;
     bool show_pinned_tab_names = true;

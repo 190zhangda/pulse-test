@@ -20,7 +20,11 @@ namespace pulse::app {
 // which is what finally destroys the object.
 class QuickLookHotkey : public std::enable_shared_from_this<QuickLookHotkey> {
 public:
-    static std::shared_ptr<QuickLookHotkey> Start();
+    // The two halves of the feature have their own switch: Space and the pointer
+    // resting on a row. Start() takes the initial pair, SetModes() follows later
+    // edits without restarting the thread.
+    static std::shared_ptr<QuickLookHotkey> Start(bool space, bool hover);
+    void SetModes(bool space, bool hover);
     ~QuickLookHotkey();
     QuickLookHotkey(const QuickLookHotkey&) = delete;
     QuickLookHotkey& operator=(const QuickLookHotkey&) = delete;
@@ -32,7 +36,9 @@ private:
     static LRESULT CALLBACK Keyboard(int code, WPARAM message, LPARAM data);
     bool Preview(HWND foreground);
     void CheckHover();
+    void CloseSpacePreview();
     void CloseHoverPreview();
+    void CloseAllPreviews();
     void ReinjectSpace();
     HANDLE thread_ = nullptr;
     std::atomic<DWORD> thread_id_{0};
@@ -46,8 +52,15 @@ private:
     // excluded either way, and normal runs never set the variable.
     bool accept_injected_ = false;
     bool reinjecting_ = false;
-    // Hover preview state, owned by the hook thread.
+    // Hover preview state, owned by the hook thread. space_process_ belongs to
+    // Space, hover_process_ to the pointer: closing one must never touch the
+    // other, because a Space press used to be filed in the hover slot and was
+    // then dismissed by the very next hover poll.
+    HANDLE space_process_ = nullptr;
     HANDLE hover_process_ = nullptr;
+    std::wstring space_path_;
+    ULONGLONG space_shown_at_ = 0;
+    std::atomic<bool> space_mode_{true}, hover_mode_{true};
     int hover_delay_ms_ = 500;
     std::wstring hover_path_;
     POINT hover_anchor_{0, 0};

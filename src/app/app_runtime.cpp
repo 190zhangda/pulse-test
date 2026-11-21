@@ -876,6 +876,8 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
             vm.settings_integration_other_exe = s.appPrefs.integration_other_exe;
             vm.settings_shell_tags = s.appPrefs.shell_tag_menu;
             vm.settings_shell_quick_look = s.appPrefs.shell_quick_look;
+    vm.settings_shell_quick_look_space = s.appPrefs.shell_quick_look_space;
+    vm.settings_shell_quick_look_hover = s.appPrefs.shell_quick_look_hover;
             vm.settings_alias_mark = app::AliasStore::Instance().ShowMark();
             vm.settings_ai_marks = s.settings.AssistantMarks();
             // Settings moves right of the docked 助手 like the panes do, so its

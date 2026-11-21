@@ -24,6 +24,8 @@ namespace {
 // and must not run inside a low level hook, which Windows silently removes when
 // a callback takes too long.
 constexpr UINT kPreviewMessage = WM_APP + 300;
+// A switch was turned off: close the preview that half had opened.
+constexpr UINT kModesChangedMessage = WM_APP + 303;
 // Polls the cursor for hover preview. Coarse enough to stay cheap, fine enough
 // that the settle delay feels immediate.
 constexpr UINT_PTR kHoverTimer = 2;
@@ -444,6 +446,10 @@ bool LaunchPreview(const std::wstring& path, HANDLE* process_out = nullptr) {
         return false;
     }
     CloseHandle(process.hThread);
+    // The preview asks for the foreground when it appears. Pulse is not the
+    // foreground process here (the shell is), so without handing the right over
+    // the request is refused and the window stays behind the old preview.
+    AllowSetForegroundWindow(process.dwProcessId);
     if (process_out) *process_out = process.hProcess;
     else CloseHandle(process.hProcess);
     return true;
@@ -467,8 +473,10 @@ QuickLookHotkey::QuickLookHotkey() {
     hover_delay_ms_ = ReadHoverDelayMs();
 }
 
-std::shared_ptr<QuickLookHotkey> QuickLookHotkey::Start() {
+std::shared_ptr<QuickLookHotkey> QuickLookHotkey::Start(bool space, bool hover) {
     std::shared_ptr<QuickLookHotkey> hotkey(new QuickLookHotkey());
+    hotkey->space_mode_ = space;
+    hotkey->hover_mode_ = hover;
     // The hook thread holds its own reference, so the object outlives Stop() and
     // is destroyed by the thread once that thread has finished unwinding.
     HANDLE thread = CreateThread(nullptr, 0, Thread, hotkey.get(), 0, nullptr);
@@ -480,11 +488,24 @@ std::shared_ptr<QuickLookHotkey> QuickLookHotkey::Start() {
     return hotkey;
 }
 
+void QuickLookHotkey::SetModes(bool space, bool hover) {
+    space_mode_ = space;
+    hover_mode_ = hover;
+    // A switch that goes off closes the preview it had opened, on this thread so
+    // the process handles stay owned by one place.
+    const auto id = thread_id_.load();
+    if (id) PostThreadMessageW(id, kModesChangedMessage, 0, 0);
+}
+
 QuickLookHotkey::~QuickLookHotkey() {
     // Start() always leaves one reference with this thread while it runs; reaching
-    // the destructor means the thread already dropped it, so only the handle and a
-    // possibly lingering preview process are left to clean up.
+    // the destructor means the thread already dropped it, so only the handle and
+    // possibly lingering preview processes are left to clean up.
     if (thread_) CloseHandle(thread_);
+    if (space_process_) {
+        TerminateProcess(space_process_, 0);
+        CloseHandle(space_process_);
+    }
     if (hover_process_) {
         TerminateProcess(hover_process_, 0);
         CloseHandle(hover_process_);
@@ -519,65 +540,95 @@ bool QuickLookHotkey::Preview(HWND foreground) {
                 {"desktop", surface == Surface::Desktop ? 1u : 0u}});
         return false;
     }
-    // Any earlier preview (hover or a previous Space press) must be replaced:
-    // leaving several Quick Look windows alive is what made Space appear to show
-    // the file from a previous press instead of the one now selected.
-    CloseHoverPreview();
+    // Any earlier preview (hover, or the one from a previous Space press) must be
+    // replaced: leaving several Quick Look windows alive is what made Space appear
+    // to show the file from a previous press instead of the one now selected.
+    CloseAllPreviews();
     HANDLE process = nullptr;
     if (!LaunchPreview(path, &process)) return false;
-    hover_process_ = process;
-    hover_path_ = path;
-    hover_shown_ = true;
-    hover_shown_at_ = GetTickCount64();
-    diagnostics::runtime::Event("quick_look_space", {{"previewed", 1}, {"error", 0}});
+    // Space keeps its own slot: filing it under the hover process made the next
+    // hover poll close the window Space had just opened.
+    space_process_ = process;
+    space_path_ = path;
+    space_shown_at_ = GetTickCount64();
+    diagnostics::runtime::TextEvent("quick_look_space_preview", {{"path", path}}, {{"previewed", 1}});
     return true;
 }
 
 namespace {
-struct CloseByProcess {
-    DWORD pid;
+struct CloseQuery {
+    DWORD pid; // 0: every Quick Look host window, whatever process owns it
     bool posted = false;
 };
 
 BOOL CALLBACK PostCloseToProcess(HWND hwnd, LPARAM lparam) {
-    auto* state = reinterpret_cast<CloseByProcess*>(lparam);
-    DWORD pid = 0;
-    GetWindowThreadProcessId(hwnd, &pid);
-    if (pid == state->pid) {
-        wchar_t name[64]{};
-        if (GetClassNameW(hwnd, name, ARRAYSIZE(name)) &&
-            wcscmp(name, L"PulseQuickLookHost") == 0) {
-            PostMessageW(hwnd, WM_CLOSE, 0, 0);
-            state->posted = true;
-            return FALSE;
-        }
+    auto* state = reinterpret_cast<CloseQuery*>(lparam);
+    wchar_t name[64]{};
+    if (!GetClassNameW(hwnd, name, ARRAYSIZE(name)) || wcscmp(name, L"PulseQuickLookHost") != 0)
+        return TRUE;
+    if (state->pid != 0) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hwnd, &pid);
+        if (pid != state->pid) return TRUE;
     }
+    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+    state->posted = true;
+    // Keep walking: an earlier press may have left more than one host behind.
     return TRUE;
 }
+
+// Ask the preview to shut down through its own message loop so COM and the
+// hosted handler release cleanly; terminate it when no window answered. The wait
+// after the request is generous because the old 500 ms was over before a hosted
+// Office preview had finished unwinding, which is how a replaced window stayed
+// visible under the new one.
+void ClosePreviewProcess(HANDLE& process) {
+    if (!process) return;
+    CloseQuery state{GetProcessId(process), false};
+    EnumWindows(PostCloseToProcess, reinterpret_cast<LPARAM>(&state));
+    if (state.posted) {
+        if (WaitForSingleObject(process, 2000) != WAIT_OBJECT_0) TerminateProcess(process, 0);
+    } else {
+        TerminateProcess(process, 0);
+    }
+    WaitForSingleObject(process, 500);
+    CloseHandle(process);
+    process = nullptr;
+}
 } // namespace
+
+void QuickLookHotkey::CloseSpacePreview() {
+    if (space_process_ && space_shown_at_) {
+        diagnostics::runtime::Event("quick_look_space_close", {{"uptime_ms", GetTickCount64() - space_shown_at_}});
+    }
+    space_shown_at_ = 0;
+    space_path_.clear();
+    ClosePreviewProcess(space_process_);
+}
+
 
 void QuickLookHotkey::CloseHoverPreview() {
     hover_pending_ = false;
     hover_shown_ = false;
     hover_path_.clear();
-    if (hover_process_) {
-        // Ask the preview to shut down through its own message loop so COM and
-        // the hosted handler release cleanly; fall back to termination if the
-        // window is not up yet.
-        CloseByProcess state{GetProcessId(hover_process_), false};
-        EnumWindows(PostCloseToProcess, reinterpret_cast<LPARAM>(&state));
-        if (state.posted) {
-            WaitForSingleObject(hover_process_, 500);
-        } else {
-            TerminateProcess(hover_process_, 0);
-            WaitForSingleObject(hover_process_, 500);
-        }
-        CloseHandle(hover_process_);
-        hover_process_ = nullptr;
-    }
+    ClosePreviewProcess(hover_process_);
+}
+
+// Closing one preview must never leave the other behind: both belong to this
+// object and the shell shows whichever window is on top.
+void QuickLookHotkey::CloseAllPreviews() {
+    CloseSpacePreview();
+    CloseHoverPreview();
 }
 
 void QuickLookHotkey::CheckHover() {
+    // Hover has its own switch: with it off the poll still runs (the switch can be
+    // turned back on without restarting the thread) but it must not touch a
+    // preview that Space opened.
+    if (!hover_mode_) {
+        CloseHoverPreview();
+        return;
+    }
     POINT cursor{0, 0};
     GetCursorPos(&cursor);
     const HWND under = WindowFromPoint(cursor);
@@ -679,7 +730,11 @@ DWORD WINAPI QuickLookHotkey::Thread(void* value) {
     SetTimer(nullptr, kHoverTimer, kHoverPollMs, nullptr);
     while (self.hook_.load() != nullptr && !self.stopping_ && GetMessageW(&message, nullptr, 0, 0) > 0) {
         if (!message.hwnd && message.message == kPreviewMessage) {
-            if (!self.Preview(reinterpret_cast<HWND>(message.wParam))) self.ReinjectSpace();
+            if (!self.space_mode_ || !self.Preview(reinterpret_cast<HWND>(message.wParam))) self.ReinjectSpace();
+        } else if (!message.hwnd && message.message == kModesChangedMessage) {
+            // Only the half that was switched off lets go of its preview.
+            if (!self.space_mode_.load()) self.CloseSpacePreview();
+            if (!self.hover_mode_.load()) self.CloseHoverPreview();
         } else if (!message.hwnd && message.message == WM_TIMER && message.wParam == kHoverTimer) {
             self.CheckHover();
         } else {
@@ -688,7 +743,7 @@ DWORD WINAPI QuickLookHotkey::Thread(void* value) {
         }
     }
     KillTimer(nullptr, kHoverTimer);
-    self.CloseHoverPreview();
+    self.CloseAllPreviews();
     if (HHOOK hook = self.hook_.exchange(nullptr)) UnhookWindowsHookEx(hook);
     CoUninitialize();
     self.active_ = false;
@@ -718,6 +773,8 @@ LRESULT CALLBACK QuickLookHotkey::Keyboard(int code, WPARAM message, LPARAM data
     }
     if (self->space_down_) return CallNextHookEx(nullptr, code, message, data);
     self->space_down_ = true;
+    // Space has its own switch (Explorer hover and Space are two settings).
+    if (!self->space_mode_) return CallNextHookEx(nullptr, code, message, data);
     // Everything else keeps Explorer's own Space behaviour (rename, type ahead).
     if (ModifierDown()) return CallNextHookEx(nullptr, code, message, data);
     const HWND foreground = GetForegroundWindow();

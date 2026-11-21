@@ -5139,4 +5139,8 @@ BEGIN
     IDS_SETUP_END_CONFIRM "將結束清單中可核驗的占用處理程序，未儲存的內容可能遺失。請先儲存工作。是否繼續？"
     IDS_SETUP_END_FAILED "部分處理程序未能結束，請查看安裝記錄或手動結束後重試。"
     IDS_QUICK_LOOK_DESC "在檔案總管或桌面選取檔案後按空格即可預覽，右鍵功能表中也有快速預覽；Pulse 在背景執行時生效。"
+    IDS_QUICK_LOOK_SPACE "空格預覽"
+    IDS_QUICK_LOOK_SPACE_DESC "在檔案總管或桌面上選取項目後按空白鍵即可預覽"
+    IDS_QUICK_LOOK_HOVER "懸停預覽"
+    IDS_QUICK_LOOK_HOVER_DESC "指標在檔案上停留片刻後自動顯示預覽"
 END

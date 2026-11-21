@@ -5159,5 +5159,9 @@
 #define IDS_SETUP_END_CONFIRM                                                            6437
 #define IDS_SETUP_END_FAILED                                                             6438
 #define IDS_QUICK_LOOK_DESC                                                              6439
+#define IDS_QUICK_LOOK_SPACE                                                             6440
+#define IDS_QUICK_LOOK_SPACE_DESC                                                        6441
+#define IDS_QUICK_LOOK_HOVER                                                             6442
+#define IDS_QUICK_LOOK_HOVER_DESC                                                        6443
 
 #endif  // PULSE_STRING_IDS_H

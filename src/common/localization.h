@@ -5151,6 +5151,10 @@ enum class StringId : UINT {
     SetupEndConfirm = IDS_SETUP_END_CONFIRM,
     SetupEndFailed = IDS_SETUP_END_FAILED,
     QuickLookDesc = IDS_QUICK_LOOK_DESC,
+    QuickLookSpace = IDS_QUICK_LOOK_SPACE,
+    QuickLookSpaceDesc = IDS_QUICK_LOOK_SPACE_DESC,
+    QuickLookHover = IDS_QUICK_LOOK_HOVER,
+    QuickLookHoverDesc = IDS_QUICK_LOOK_HOVER_DESC,
 };
 
 bool IsLanguageId(std::wstring_view id) noexcept;

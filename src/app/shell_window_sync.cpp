@@ -53,13 +53,18 @@ void SyncExplorerTakeover(AppState& s) {
     if (win_e_enabled && !s.core.win_e_hotkey)
         s.core.win_e_hotkey = std::make_unique<app::WinEHotkey>(s.single_instance, ServiceWindow(s), WM_OPEN_EXTERNAL);
     else if (!win_e_enabled && s.core.win_e_hotkey) s.core.win_e_hotkey.reset();
-    // Space in Explorer / on the desktop opens the Quick Look window; the same
-    // preference also publishes the right-click verb (quick_look_verb.cpp).
-    const bool quick_look_space_enabled = ShellIntegrationAllowed(s, L"PULSE_TEST_QUICK_LOOK_SPACE") &&
-        s.appPrefs.shell_quick_look && s.single_instance.OwnsEndpoint(ServiceWindow(s)) && !s.core.exiting;
-    if (quick_look_space_enabled && !s.core.quick_look_hotkey)
-        s.core.quick_look_hotkey = app::QuickLookHotkey::Start();
-    else if (!quick_look_space_enabled && s.core.quick_look_hotkey) {
+    // Space and hover in File Explorer are two settings; the hook serves whichever
+    // halves are on. The same preference also publishes the right-click verb
+    // (quick_look_verb.cpp).
+    const bool quick_look_enabled = ShellIntegrationAllowed(s, L"PULSE_TEST_QUICK_LOOK_SPACE") &&
+        (s.appPrefs.shell_quick_look_space || s.appPrefs.shell_quick_look_hover) &&
+        s.single_instance.OwnsEndpoint(ServiceWindow(s)) && !s.core.exiting;
+    if (quick_look_enabled && !s.core.quick_look_hotkey)
+        s.core.quick_look_hotkey = app::QuickLookHotkey::Start(s.appPrefs.shell_quick_look_space,
+            s.appPrefs.shell_quick_look_hover);
+    else if (quick_look_enabled && s.core.quick_look_hotkey)
+        s.core.quick_look_hotkey->SetModes(s.appPrefs.shell_quick_look_space, s.appPrefs.shell_quick_look_hover);
+    else if (!quick_look_enabled && s.core.quick_look_hotkey) {
         // The thread holds its own reference, so dropping ours alone would leave the
         // hook installed and Space still intercepted after the preference is off.
         s.core.quick_look_hotkey->Stop();
