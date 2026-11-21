@@ -1,5 +1,6 @@
 #include "single_instance_coordinator.h"
 #include "../common/runtime_log.h"
+#include "../fs/fs_enum.h"
 #include "open_request_pipe.h"
 #include "explorer_submission_port.h"
 
@@ -219,6 +220,9 @@ bool SingleInstanceCoordinator::NormalizeLaunchPath(const std::wstring& input, s
         if (!path.empty() && path.back() == L'"') path.pop_back();
     }
     if (path.empty()) { output.clear(); return true; }
+    // A folder outside Win32 (ftp://, pulse:) has to survive as it was typed:
+    // GetFullPathNameW would fold it into the launch directory.
+    if (fs::IsVirtualPath(path)) { output = path; return true; }
     std::replace(path.begin(), path.end(), L'/', L'\\');
     if (path.size() == 2 && path[1] == L':') path += L'\\';
     wchar_t absolute[32768]{};

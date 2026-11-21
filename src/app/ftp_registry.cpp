@@ -109,6 +109,10 @@ std::shared_ptr<FtpRegistry::Server> FtpRegistry::ServerFor(const fs::FtpUrl& ur
     if (!slot) slot = std::make_shared<Server>();
     slot->host = url.host;
     slot->port = url.port;
+    // The credentials may only exist in the address the tab holds: a path that
+    // came from the command line never went through Remember().
+    if (!url.user.empty()) slot->user = url.user;
+    if (!url.password.empty()) slot->password = url.password;
     return slot;
 }
 
