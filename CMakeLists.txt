@@ -710,7 +710,7 @@ target_link_options(pulse PRIVATE /MAP)
     target_link_libraries(pulse PRIVATE propsys oleaut32)  # shell_window_registry.cpp
     target_link_libraries(pulse PRIVATE uiautomationcore)  # quick_look_hotkey.cpp: desktop icon under Space
     target_link_libraries(pulse PRIVATE cfgmgr32)  # device_shell.cpp: portable device presence
-    target_link_libraries(pulse PRIVATE winhttp crypt32 secur32)
+    target_link_libraries(pulse PRIVATE winhttp crypt32 secur32 ws2_32)  # ws2_32: fs/ftp_client.cpp
     # System DLLs the first frame never calls: delay-loading them takes them
     # and their own imports out of the loader's work at every cold start.
     target_link_libraries(pulse PRIVATE delayimp)
