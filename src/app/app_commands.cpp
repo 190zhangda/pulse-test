@@ -6255,7 +6255,7 @@ void ApplyFtpCacheReady(AppState& s, const app::FtpCacheResult& result) {
     OpenQuickPreview(s, item, true);
 }
 
-void ApplyFtpOpsDone(AppState& s, const app::FtpOpsResult& result) {
+void ApplyFtpOpsDone(AppState& s, const app::FtpOpResult& result) {
     if (result.error != 0) {
         using I = l10n::StringId;
         I message = I::DirectoryUnavailable;

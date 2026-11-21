@@ -1182,6 +1182,7 @@ void LoadVirtualView(AppState& s, app::Tab& tab, const std::wstring& path, PathL
     if (fs::ParseFtpUrl(path, ftp)) {
         // An ftp:// folder: listed on the worker thread (WorkerPool -> FtpRegistry).
         tab.virtual_title = fs::FtpCanonicalText(ftp);
+        tab.net_readonly = false;  // an earlier Auth banner must not outlive a retry
         tab.loading = true;
         tab.SetSnapshot(nullptr);
         tab.banner_title.clear();

@@ -94,7 +94,9 @@ FtpError FtpRegistry::Run(const std::wstring& url, const char* what,
 void FtpRegistry::Remember(const fs::FtpUrl& url) {
     if (!url.valid) return;
     std::lock_guard lock(mutex_);
-    Server& server = *servers_[KeyFor(url)];
+    std::shared_ptr<Server>& slot = servers_[KeyFor(url)];
+    if (!slot) slot = std::make_shared<Server>();
+    Server& server = *slot;
     server.host = url.host;
     server.port = url.port;
     if (!url.user.empty()) server.user = url.user;

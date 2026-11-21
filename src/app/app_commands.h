@@ -262,7 +262,7 @@ void HandleQuickPreviewCommand(AppState& s, ui::QuickPreviewWindow& preview,
 void OpenQuickPreview(AppState& s, const ui::QuickPreviewItem& item, bool activate);
 // A remote file finished downloading for a preview command (WM_FTP_CACHE_READY).
 void ApplyFtpCacheReady(AppState& s, const app::FtpCacheResult& result);
-void ApplyFtpOpsDone(AppState& s, const app::FtpOpsResult& result);
+void ApplyFtpOpsDone(AppState& s, const app::FtpOpResult& result);
 // 按住预览 (Settings > 快速预览): a press on a file row arms it; the preview
 // opens if the button is still down after the delay and the pointer stayed
 // within the drag threshold, and closes on release. Space pins it open.
