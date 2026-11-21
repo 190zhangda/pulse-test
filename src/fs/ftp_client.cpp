@@ -488,7 +488,7 @@ FtpStatus FtpClient::Connect(const std::wstring& host, uint16_t port, const std:
     return FtpStatus::Ok;
 }
 
-FtpStatus FtpClient::OpenData(SOCKET* data, std::wstring* detail) {
+FtpStatus FtpClient::OpenData(FtpHandle* data, std::wstring* detail) {
     *data = INVALID_SOCKET;
     Reply reply;
     std::wstring host;

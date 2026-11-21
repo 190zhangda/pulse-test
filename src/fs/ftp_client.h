@@ -45,6 +45,13 @@ struct FtpItem {
     bool has_mtime = false;
 };
 
+// The control connection is a winsock handle. It is spelled as an integer here
+// so this header does not have to include <winsock2.h>, which must come before
+// <windows.h> in every translation unit that already includes the latter.
+// SOCKET is UINT_PTR, so the .cpp can use the value directly.
+using FtpHandle = std::uintptr_t;
+inline constexpr FtpHandle kNoHandle = static_cast<FtpHandle>(~0ull);  // INVALID_SOCKET
+
 struct FtpSettings {
     uint32_t connect_timeout_ms = 8000;
     uint32_t io_timeout_ms = 20000;
@@ -72,7 +79,7 @@ public:
     FtpStatus Connect(const std::wstring& host, uint16_t port, const std::wstring& user,
                       const std::wstring& password, std::wstring* detail);
     void Close();
-    bool connected() const { return control_ != INVALID_SOCKET; }
+    bool connected() const { return control_ != kNoHandle; }
 
     // Rows of one folder. The path is tried as "LIST <path>", then as
     // "CWD <path>" + "LIST"; names come back decoded from UTF-8.
@@ -106,7 +113,7 @@ private:
     FtpStatus Command(const std::string& line, Reply* reply, std::wstring* detail);
     FtpStatus ReadReply(Reply* reply, std::wstring* detail);
     FtpStatus Expect(int wanted, const std::string& line, Reply* reply, std::wstring* detail);
-    FtpStatus OpenData(SOCKET* data, std::wstring* detail);
+    FtpStatus OpenData(FtpHandle* data, std::wstring* detail);
     FtpStatus FinishTransfer(Reply* reply, std::wstring* detail);
     FtpStatus Abort();
 
@@ -115,7 +122,7 @@ private:
     void Reset();
 
     FtpSettings settings_;
-    SOCKET control_ = INVALID_SOCKET;
+    FtpHandle control_ = kNoHandle;
     std::string buffer_;
     bool utf8_names_ = false;
     bool epsv_ = true;
