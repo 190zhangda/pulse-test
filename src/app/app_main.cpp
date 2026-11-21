@@ -16,6 +16,8 @@ namespace pulse::app { bool RunMediaColumnResizeCapture(); }
 #include "picker_places_commands.h"
 #include "../ui/thumbnail_retry_timer.h"
 #include "drive_eject_ui.h"
+#include "ftp_cache.h"
+#include "ftp_registry.h"
 #include "app_diagnostics.h"
 #include "partial_redraw.h"
 #include "git_ui.h"
@@ -1206,6 +1208,9 @@ static void HandOffAtExit(AppState& s, HWND hwnd) {
     // AI calls end before the operations they could start (cancelled, pipe closed).
     pulse::app::ai::StopAiService();
     s.ops.Stop();
+    // The FTP fetches stop polling their cancel flag; the clients close.
+    app::FtpCache::Instance().Shutdown();
+    app::FtpRegistry::Instance().DropAll();
     ops::ShutdownElevatedTransferHelper();
     const uint64_t ops_ms = timer.Lap();
     // Sweeps every stage, so it must finish before another Pulse can make one.
@@ -3177,6 +3182,13 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             app::ForEachWindowSharingCore(*s, [&](AppState& window) {
                 ApplyBitLockerUnlock(window, result->root, result->unlocked);
             });
+        return 0;
+    }
+
+    case WM_FTP_CACHE_READY: {
+        std::unique_ptr<app::FtpCacheResult> result(
+            reinterpret_cast<app::FtpCacheResult*>(lParam));
+        if (s && result) ApplyFtpCacheReady(*s, *result);
         return 0;
     }
 

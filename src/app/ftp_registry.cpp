@@ -73,6 +73,36 @@ std::shared_ptr<FtpRegistry::Server> FtpRegistry::ServerFor(const fs::FtpUrl& ur
     return slot;
 }
 
+FtpError FtpRegistry::Download(const std::wstring& url, const std::wstring& local,
+                               const std::function<bool()>& cancelled) {
+    fs::FtpUrl parsed;
+    if (!fs::ParseFtpUrl(url, parsed)) return FtpError::BadUrl;
+
+    std::lock_guard lock(mutex_);
+    const std::shared_ptr<Server> server = ServerFor(parsed);
+    std::wstring detail;
+    if (!server->logged_in) {
+        const fs::FtpStatus connected =
+            server->client.Connect(server->host, server->port, server->user, server->password, &detail);
+        if (connected != fs::FtpStatus::Ok) {
+            server->client.Close();
+            return MapStatus(connected);
+        }
+        server->logged_in = true;
+    }
+    const fs::FtpStatus fetched = server->client.Download(parsed.path, local, cancelled, {}, &detail);
+    if (fetched != fs::FtpStatus::Ok) {
+        if (fetched != fs::FtpStatus::Cancelled) {
+            server->client.Close();
+            server->logged_in = false;
+        }
+        diagnostics::runtime::TextEvent("ftp_download_failed", {{"path", parsed.path}},
+                                        {{"status", static_cast<uint64_t>(fetched)}});
+        return MapStatus(fetched);
+    }
+    diagnostics::runtime::TextEvent("ftp_downloaded", {{"path", parsed.path}}, {{"ok", 1}});
+    return FtpError::None;
+}
 bool FtpRegistry::FolderWritable(const std::wstring& url) const {
     fs::FtpUrl parsed;
     return fs::ParseFtpUrl(url, parsed);

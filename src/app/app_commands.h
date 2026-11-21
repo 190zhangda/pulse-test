@@ -4,7 +4,7 @@
 #include "../ui/quick_preview_command.h"
 
 namespace pulse::ui { struct ToolbarCustomizeSpec; struct ToolbarPickerTile; struct FluentMenuItem; }
-namespace pulse::app { struct SelectionCaps; struct DriveVerbResult; }
+namespace pulse::app { struct SelectionCaps; struct DriveVerbResult; struct FtpCacheResult; }
 
 namespace pulse {
 bool EnsureMenu(AppState& s);
@@ -260,6 +260,8 @@ void HandleQuickPreviewCommand(AppState& s, ui::QuickPreviewWindow& preview,
 // Quick Look on `item` (the focused tab's selected row); activate false: the
 // press-and-hold peek, which leaves the focus and the mouse with Pulse.
 void OpenQuickPreview(AppState& s, const ui::QuickPreviewItem& item, bool activate);
+// A remote file finished downloading for a preview command (WM_FTP_CACHE_READY).
+void ApplyFtpCacheReady(AppState& s, const app::FtpCacheResult& result);
 // 按住预览 (Settings > 快速预览): a press on a file row arms it; the preview
 // opens if the button is still down after the delay and the pointer stayed
 // within the drag threshold, and closes on release. Space pins it open.

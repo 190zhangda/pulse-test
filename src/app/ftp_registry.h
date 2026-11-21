@@ -48,6 +48,11 @@ public:
     // polled between replies and during a transfer.
     FtpError ListFolder(const std::wstring& url, std::vector<fs::DirEntry>& out,
                         const std::function<bool()>& cancelled);
+    // Fetches one remote file to `local` (an ftp:// URL). Runs on the caller's
+    // thread and holds the server while it does, so a listing of the same
+    // server waits for it: one control connection, one command at a time.
+    FtpError Download(const std::wstring& url, const std::wstring& local,
+                      const std::function<bool()>& cancelled);
     // A folder that takes a paste (an FTP folder always does: the server may
     // still refuse, which the operation reports).
     bool FolderWritable(const std::wstring& url) const;

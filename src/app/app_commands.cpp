@@ -9,6 +9,9 @@
 #include "quick_preview_navigation.h"
 #include "tag_color_commands.h"
 #include "picker_appearance.h"
+#include "ftp_cache.h"
+#include "ftp_registry.h"
+#include "../fs/ftp_url.h"
 #include "git_ui.h"
 #include "mtime_hint_prefs.h"
 #include "tag_ads_sync.h"
@@ -6136,7 +6139,14 @@ void ToggleQuickPreview(AppState& s) {
     }
     if(DeferContentSelection(s,[](AppState& v){ToggleQuickPreview(v);},true)) return;
     ui::QuickPreviewItem item;
-    if (SelectedQuickPreviewItem(s, item)) OpenQuickPreview(s, item, true);
+    if (!SelectedQuickPreviewItem(s, item)) return;
+    if (fs::IsFtpUrl(item.path)) {
+        // A remote file: fetch a copy first, the preview opens when it lands
+        // (ApplyFtpCacheReady). The window shows nothing meanwhile.
+        FtpCache::Instance().Request(item.path, s.hwnd, true);
+        return;
+    }
+    OpenQuickPreview(s, item, true);
 }
 
 void OpenQuickPreview(AppState& s, const ui::QuickPreviewItem& item, bool activate) {
@@ -6178,6 +6188,39 @@ void OpenQuickPreview(AppState& s, const ui::QuickPreviewItem& item, bool activa
     }
 }
 
+void ApplyFtpCacheReady(AppState& s, const app::FtpCacheResult& result) {
+    if (result.error != 0 || result.local_path.empty()) {
+        // Nothing to open: say why on the folder banner, like an ftp:// listing does.
+        if (app::Tab* tab = ActiveTab(s)) {
+            using I = l10n::StringId;
+            I message = I::DirectoryUnavailable;
+            if (result.error == static_cast<uint8_t>(app::FtpError::Auth))
+                message = I::IfTheServerAsksYouToSignInEnterTheUserNameAndPasswordInTheWi;
+            tab->banner_title = l10n::Get(I::CannotOpen);
+            tab->banner_message = l10n::Get(message);
+            InvalidateRect(s.hwnd, nullptr, FALSE);
+        }
+        return;
+    }
+    if (!result.for_preview) return;  // a copy for a later stage: nothing to show
+    fs::FtpUrl parsed;
+    if (!fs::ParseFtpUrl(result.url, parsed)) return;
+    ui::QuickPreviewItem item;
+    item.path = result.local_path;
+    item.name = fs::FtpLeafName(parsed.path);
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (GetFileAttributesExW(result.local_path.c_str(), GetFileExInfoStandard, &data)) {
+        item.attrs = data.dwFileAttributes;
+        item.size = (static_cast<uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+        item.modified = (static_cast<uint64_t>(data.ftLastWriteTime.dwHighDateTime) << 32) |
+                        data.ftLastWriteTime.dwLowDateTime;
+    }
+    // The copy in the cache is not the user's file: editing it changes nothing
+    // on the server, so the preview offers no write commands.
+    item.read_only = true;
+    OpenQuickPreview(s, item, true);
+}
+
 void NavigateQuickPreview(AppState& s, int direction) {
     app::Tab* tab = ActiveTab(s);
     if (!tab) return;
@@ -6205,6 +6248,13 @@ void SyncDetailsPreview(AppState& s) {
         s.quickPreview.visible() || !tab || tab->loading || tab->SelectedCount() != 1 ||
         bounds.right <= bounds.left || bounds.bottom <= bounds.top ||
         !SelectedQuickPreviewItem(s, item)) {
+        s.detailsPreview.Close();
+        s.detailsPreview.SetEmbeddedOcclusion({});
+        return;
+    }
+    if (fs::IsFtpUrl(item.path)) {
+        // A remote file: the panel cannot read it, and a copy is only
+        // fetched when the user asks for the preview.
         s.detailsPreview.Close();
         s.detailsPreview.SetEmbeddedOcclusion({});
         return;

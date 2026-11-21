@@ -118,3 +118,4 @@ constexpr UINT WM_DETAILS_PREVIEW_OPEN = WM_APP + 138;
 constexpr UINT WM_DETAILS_PREVIEW_COMMAND = WM_APP + 139;
 constexpr UINT WM_DRAG_RETURN = WM_APP + 143;
 constexpr UINT WM_HISTORY_REDO = WM_APP + 144;
+constexpr UINT WM_FTP_CACHE_READY = WM_APP + 145;  // app::FtpCacheResult* (ftp_cache.h): a remote file was fetched
