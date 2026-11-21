@@ -26,6 +26,16 @@ namespace {
 constexpr UINT kPreviewMessage = WM_APP + 300;
 // A switch was turned off: close the preview that half had opened.
 constexpr UINT kModesChangedMessage = WM_APP + 303;
+// Posted to this thread once an icon organiser has handed over a path: another
+// process's SendMessage must be answered at once, so the preview itself is
+// started from this thread's own loop rather than inside the window procedure.
+constexpr UINT kOrganiserMessage = WM_APP + 304;
+// The window class a desktop icon organiser looks for when it publishes the icon
+// the user acted on. Coodesker sends the file path as WM_COPYDATA with dwData
+// 5000 instead of leaving the selection in the shell, which is why the shell's
+// views and the accessibility tree all come back empty while its own icons work.
+constexpr wchar_t kOrganiserClass[] = L"SeerWindowClass";
+constexpr ULONG_PTR kOrganiserDataId = 5000;
 // Polls the cursor for hover preview. Coarse enough to stay cheap, fine enough
 // that the settle delay feels immediate.
 constexpr UINT_PTR kHoverTimer = 2;
@@ -538,7 +548,10 @@ bool QuickLookHotkey::Preview(HWND foreground) {
         diagnostics::runtime::Event("quick_look_miss",
             {{"surface", static_cast<uint64_t>(static_cast<int>(surface))},
                 {"desktop", surface == Surface::Desktop ? 1u : 0u}});
-        return false;
+        // The desktop answers through the organiser channel instead: the key press
+        // was left alone so that the organiser still sees it and publishes the icon
+        // it just acted on. Reinjecting here would only send the key a second time.
+        return surface == Surface::Desktop;
     }
     // Any earlier preview (hover, or the one from a previous Space press) must be
     // replaced: leaving several Quick Look windows alive is what made Space appear
@@ -698,6 +711,93 @@ void QuickLookHotkey::ReinjectSpace() {
     reinjecting_ = false;
 }
 
+// Create the window an icon organiser hands its selection to. It is never shown:
+// it exists purely to receive WM_COPYDATA.
+void QuickLookHotkey::CreateOrganiserWindow() {
+    HINSTANCE instance = GetModuleHandleW(nullptr);
+    WNDCLASSEXW definition{};
+    definition.cbSize = sizeof(definition);
+    definition.lpfnWndProc = OrganiserWindowProc;
+    definition.hInstance = instance;
+    definition.lpszClassName = kOrganiserClass;
+    if (!RegisterClassExW(&definition)) {
+        const DWORD error = GetLastError();
+        if (error == ERROR_CLASS_ALREADY_EXISTS) {
+            // Another Seer style receiver already owns the class name. A window
+            // created now would call its procedure instead of ours, so the whole
+            // channel has to be left to that process rather than silently doing
+            // nothing.
+            diagnostics::runtime::Event("quick_look_organiser", {{"registered", 0}, {"error", error}});
+            return;
+        }
+        diagnostics::runtime::Event("quick_look_organiser", {{"registered", 0}, {"error", error}});
+        return;
+    }
+    // A plain (never shown) top level window rather than a message-only one: the
+    // organiser looks the receiver up with FindWindow, which does not see
+    // message-only windows.
+    organiser_window_ = CreateWindowExW(WS_EX_TOOLWINDOW, kOrganiserClass, L"Pulse Quick Look", WS_POPUP,
+        0, 0, 0, 0, nullptr, nullptr, instance, nullptr);
+    diagnostics::runtime::Event("quick_look_organiser",
+        {{"registered", 1}, {"window", organiser_window_ ? 1u : 0u}});
+}
+
+void QuickLookHotkey::DestroyOrganiserWindow() {
+    if (!organiser_window_) return;
+    DestroyWindow(organiser_window_);
+    organiser_window_ = nullptr;
+}
+
+LRESULT CALLBACK QuickLookHotkey::OrganiserWindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    auto* self = current_;
+    if (message == WM_COPYDATA && self) {
+        const auto* data = reinterpret_cast<const COPYDATASTRUCT*>(lparam);
+        if (data && data->dwData == kOrganiserDataId && data->cbData >= sizeof(wchar_t) && data->lpData) {
+            std::wstring path(static_cast<const wchar_t*>(data->lpData), data->cbData / sizeof(wchar_t));
+            while (!path.empty() && path.back() == L'\0') path.pop_back();
+            if (!path.empty()) {
+                {
+                    std::lock_guard<std::mutex> guard(self->organiser_lock_);
+                    self->organiser_path_ = path;
+                }
+                // Hand the work to the hook thread: answering the sender is what
+                // unblocks the organiser, and starting a process here would stall
+                // it inside our own CreateProcess.
+                const auto id = self->thread_id_.load();
+                if (id) PostThreadMessageW(id, kOrganiserMessage, 0, 0);
+            }
+            return TRUE;
+        }
+    }
+    return DefWindowProcW(window, message, wparam, lparam);
+}
+
+// Show the path the organiser just published. This is the desktop's only
+// truthful source: the organiser owns the icons and the shell's views stay empty.
+void QuickLookHotkey::PreviewOrganiserPath() {
+    std::wstring path;
+    {
+        std::lock_guard<std::mutex> guard(organiser_lock_);
+        path.swap(organiser_path_);
+    }
+    if (path.empty()) return;
+    // The same press can be answered twice: the lookup above reads the desktop's
+    // selection from the shell and the organiser then publishes the very same
+    // icon. Keeping the live preview when the path matches avoids a second process
+    // launch for a window that is already on screen.
+    if (space_process_ && _wcsicmp(path.c_str(), space_path_.c_str()) == 0) {
+        diagnostics::runtime::Event("quick_look_organiser_preview", {{"previewed", 0}, {"duplicate", 1}});
+        return;
+    }
+    diagnostics::runtime::TextEvent("quick_look_organiser_preview", {{"path", path}}, {{"previewed", 1}});
+    CloseAllPreviews();
+    HANDLE process = nullptr;
+    if (!LaunchPreview(path, &process)) return;
+    space_process_ = process;
+    space_path_ = path;
+    space_shown_at_ = GetTickCount64();
+}
+
 DWORD WINAPI QuickLookHotkey::Thread(void* value) {
     // Hold a reference for the whole thread: Stop() never joins, so the object
     // must stay alive until this function has finished its own teardown.
@@ -728,9 +828,13 @@ DWORD WINAPI QuickLookHotkey::Thread(void* value) {
         {{"enabled", self.active_.load()}, {"error", created ? ERROR_SUCCESS : GetLastError()}});
     // Hover polling uses a timer on this thread's (hidden) message queue.
     SetTimer(nullptr, kHoverTimer, kHoverPollMs, nullptr);
+    // The desktop's icon organiser publishes its selection to this window class.
+    self.CreateOrganiserWindow();
     while (self.hook_.load() != nullptr && !self.stopping_ && GetMessageW(&message, nullptr, 0, 0) > 0) {
         if (!message.hwnd && message.message == kPreviewMessage) {
             if (!self.space_mode_ || !self.Preview(reinterpret_cast<HWND>(message.wParam))) self.ReinjectSpace();
+        } else if (!message.hwnd && message.message == kOrganiserMessage) {
+            if (self.space_mode_) self.PreviewOrganiserPath();
         } else if (!message.hwnd && message.message == kModesChangedMessage) {
             // Only the half that was switched off lets go of its preview.
             if (!self.space_mode_.load()) self.CloseSpacePreview();
@@ -743,6 +847,7 @@ DWORD WINAPI QuickLookHotkey::Thread(void* value) {
         }
     }
     KillTimer(nullptr, kHoverTimer);
+    self.DestroyOrganiserWindow();
     self.CloseAllPreviews();
     if (HHOOK hook = self.hook_.exchange(nullptr)) UnhookWindowsHookEx(hook);
     CoUninitialize();
@@ -778,10 +883,19 @@ LRESULT CALLBACK QuickLookHotkey::Keyboard(int code, WPARAM message, LPARAM data
     // Everything else keeps Explorer's own Space behaviour (rename, type ahead).
     if (ModifierDown()) return CallNextHookEx(nullptr, code, message, data);
     const HWND foreground = GetForegroundWindow();
-    if (ClassifyAt(foreground) == Surface::None) return CallNextHookEx(nullptr, code, message, data);
+    const Surface surface = ClassifyAt(foreground);
+    if (surface == Surface::None) return CallNextHookEx(nullptr, code, message, data);
     if (FocusIsTextInput(foreground)) return CallNextHookEx(nullptr, code, message, data);
     const auto id = self->thread_id_.load();
     if (!id) return CallNextHookEx(nullptr, code, message, data);
+    // The desktop is never swallowed: an icon organiser runs its own keyboard hook
+    // and only publishes the icon it acted on after seeing this press, so the key
+    // has to keep travelling while the lookup runs on the hook thread. Both halves
+    // end in the same preview, and the second one replaces the first.
+    if (surface == Surface::Desktop) {
+        PostThreadMessageW(id, kPreviewMessage, reinterpret_cast<WPARAM>(foreground), 0);
+        return CallNextHookEx(nullptr, code, message, data);
+    }
     self->swallowed_ = true;
     PostThreadMessageW(id, kPreviewMessage, reinterpret_cast<WPARAM>(foreground), 0);
     return 1;

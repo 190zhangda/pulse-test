@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 
 namespace pulse::app {
@@ -40,6 +41,13 @@ private:
     void CloseHoverPreview();
     void CloseAllPreviews();
     void ReinjectSpace();
+    // Desktop icon organisers publish the icon the user acted on through their
+    // own channel, not through the shell: Coodesker sends the path to a window of
+    // class "SeerWindowClass" as WM_COPYDATA. This window is where that arrives.
+    void CreateOrganiserWindow();
+    void DestroyOrganiserWindow();
+    void PreviewOrganiserPath();
+    static LRESULT CALLBACK OrganiserWindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam);
     HANDLE thread_ = nullptr;
     std::atomic<DWORD> thread_id_{0};
     std::atomic<bool> stopping_{false}, active_{false};
@@ -61,6 +69,15 @@ private:
     std::wstring space_path_;
     ULONGLONG space_shown_at_ = 0;
     std::atomic<bool> space_mode_{true}, hover_mode_{true};
+    // The organiser's WM_COPYDATA payload, filled by the window procedure and read
+    // by the hook thread's own loop, so no preview is ever started inside a
+    // message sent by another process.
+    HWND organiser_window_ = nullptr;
+    std::wstring organiser_path_;
+    // WM_COPYDATA arrives on the hook thread's own message loop, but the state it
+    // fills is read from that same thread's loop afterwards; the lock keeps the
+    // window procedure honest if the organiser ever sends from another thread.
+    std::mutex organiser_lock_;
     int hover_delay_ms_ = 500;
     std::wstring hover_path_;
     POINT hover_anchor_{0, 0};
