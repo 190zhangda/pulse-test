@@ -2085,12 +2085,16 @@ void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const Place
     out.can_go_forward = tab->CanGoForward();
     std::wstring virtual_kind;
     ParsePulsePath(tab->current_path, &virtual_kind, nullptr);
+    fs::FtpUrl ftp_folder;  // an ftp:// tab: a listing with its own write path
+    const bool is_ftp = fs::ParseFtpUrl(tab->current_path, ftp_folder);
     out.can_go_up = virtual_kind == L"recycle" || virtual_kind == L"device"
         ? true
-        : (fs::IsVirtualPath(tab->current_path) ? tab->CanGoBack() : !tab->current_path.empty());
+        : (fs::IsVirtualPath(tab->current_path)
+               ? (is_ftp ? fs::FtpParentPath(ftp_folder.path) != ftp_folder.path : tab->CanGoBack())
+               : !tab->current_path.empty());
     out.is_file_system = !tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path);
     out.cloud_status_column = out.is_file_system && IsUnderCloudFilesRoot(tab->current_path);
-    out.can_create = out.is_file_system && !tab->net_readonly && !IsUncServerRoot(tab->current_path);
+    out.can_create = (out.is_file_system || is_ftp) && !tab->net_readonly && !IsUncServerRoot(tab->current_path);
     out.can_create_folder = out.can_create;  // the app adds a writable phone folder
     // The network page and a server's share list: 连接服务器 takes 新建's slot.
     out.connect_server = tab->current_path == L"pulse:networks" || IsUncServerRoot(tab->current_path);
