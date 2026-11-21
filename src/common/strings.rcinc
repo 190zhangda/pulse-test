@@ -5145,6 +5145,7 @@ BEGIN
     IDS_QUICK_LOOK_SPACE_DESC "在资源管理器或桌面上选中项目后按空格即可预览"
     IDS_QUICK_LOOK_HOVER "悬停预览"
     IDS_QUICK_LOOK_HOVER_DESC "指针在文件上停留片刻后自动显示预览"
+    IDS_FTP_DELETE_CONFIRM_FORMAT "将从服务器永久删除 %zu 项，无法还原。"
 END
 
 LANGUAGE 0x09, 0x01
@@ -10289,6 +10290,7 @@ BEGIN
     IDS_QUICK_LOOK_SPACE_DESC "Select an item in File Explorer or on the desktop and press Space to preview it"
     IDS_QUICK_LOOK_HOVER "Hover preview"
     IDS_QUICK_LOOK_HOVER_DESC "Rest the pointer on a file for a moment and the preview appears on its own"
+    IDS_FTP_DELETE_CONFIRM_FORMAT "Delete %zu items from the server for good. This can't be undone."
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

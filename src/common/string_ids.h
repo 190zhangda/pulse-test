@@ -5163,5 +5163,6 @@
 #define IDS_QUICK_LOOK_SPACE_DESC                                                        6441
 #define IDS_QUICK_LOOK_HOVER                                                             6442
 #define IDS_QUICK_LOOK_HOVER_DESC                                                        6443
+#define IDS_FTP_DELETE_CONFIRM_FORMAT                                                    6444
 
 #endif  // PULSE_STRING_IDS_H

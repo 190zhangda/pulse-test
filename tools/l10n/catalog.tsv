@@ -5170,3 +5170,4 @@ QuickLookSpace	IDS_QUICK_LOOK_SPACE	6440	空格预览	Space preview	空格預覽
 QuickLookSpaceDesc	IDS_QUICK_LOOK_SPACE_DESC	6441	在资源管理器或桌面上选中项目后按空格即可预览	Select an item in File Explorer or on the desktop and press Space to preview it	在檔案總管或桌面上選取項目後按空白鍵即可預覽
 QuickLookHover	IDS_QUICK_LOOK_HOVER	6442	悬停预览	Hover preview	懸停預覽
 QuickLookHoverDesc	IDS_QUICK_LOOK_HOVER_DESC	6443	指针在文件上停留片刻后自动显示预览	Rest the pointer on a file for a moment and the preview appears on its own	指標在檔案上停留片刻後自動顯示預覽
+FtpDeleteConfirmFormat	IDS_FTP_DELETE_CONFIRM_FORMAT	6444	将从服务器永久删除 %zu 项，无法还原。	Delete %zu items from the server for good. This can't be undone.	將從伺服器永久刪除 %zu 項，無法還原。

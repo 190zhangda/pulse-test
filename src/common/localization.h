@@ -5155,6 +5155,7 @@ enum class StringId : UINT {
     QuickLookSpaceDesc = IDS_QUICK_LOOK_SPACE_DESC,
     QuickLookHover = IDS_QUICK_LOOK_HOVER,
     QuickLookHoverDesc = IDS_QUICK_LOOK_HOVER_DESC,
+    FtpDeleteConfirmFormat = IDS_FTP_DELETE_CONFIRM_FORMAT,
 };
 
 bool IsLanguageId(std::wstring_view id) noexcept;

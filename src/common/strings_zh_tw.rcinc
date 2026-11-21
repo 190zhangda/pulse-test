@@ -5143,4 +5143,5 @@ BEGIN
     IDS_QUICK_LOOK_SPACE_DESC "在檔案總管或桌面上選取項目後按空白鍵即可預覽"
     IDS_QUICK_LOOK_HOVER "懸停預覽"
     IDS_QUICK_LOOK_HOVER_DESC "指標在檔案上停留片刻後自動顯示預覽"
+    IDS_FTP_DELETE_CONFIRM_FORMAT "將從伺服器永久刪除 %zu 項，無法還原。"
 END
