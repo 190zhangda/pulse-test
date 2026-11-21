@@ -14,8 +14,7 @@ namespace pulse::app {
 namespace {
 
 std::atomic<bool> stopping{false};
-std::mutex worker_mutex;
-std::thread worker;
+std::atomic<int> active{0};  // requests still running
 
 // The app is going away: long uploads give up between files.
 bool Cancelled() { return stopping.load(); }
@@ -198,23 +197,30 @@ bool FtpOps::Submit(FtpOpRequest request, HWND window) {
     if (request.kind != FtpOpKind::MakeDirectory && request.sources.empty()) return false;
     if (request.kind == FtpOpKind::MakeDirectory && request.new_name.empty()) return false;
 
-    std::lock_guard lock(worker_mutex);
-    if (worker.joinable()) worker.join();  // the previous request is finished
+    // The caller is the window procedure, so it must not wait for a transfer
+    // that is still running: every request gets its own thread. They meet on
+    // the registry's mutex, which keeps one conversation per server.
     stopping.store(false);
-    worker = std::thread([request = std::move(request), window]() mutable {
+    active.fetch_add(1);
+    std::thread([request = std::move(request), window]() mutable {
         FtpOpResult done = RunRequest(request);
         diagnostics::runtime::Event("ftp_op_done", {{"done", static_cast<uint64_t>(done.done)},
                                                     {"failed", static_cast<uint64_t>(done.failed)},
                                                     {"error", static_cast<uint64_t>(done.error)}});
-        PostMessageW(window, WM_FTP_OPS_DONE, 0, reinterpret_cast<LPARAM>(new FtpOpResult(std::move(done))));
-    });
+        if (!stopping.load()) {
+            PostMessageW(window, WM_FTP_OPS_DONE, 0,
+                         reinterpret_cast<LPARAM>(new FtpOpResult(std::move(done))));
+        }
+        active.fetch_sub(1);
+    }).detach();
     return true;
 }
 
 void FtpOps::Shutdown() {
+    // The app is going away: give a short transfer a moment, then leave. The
+    // threads give up between files once `stopping` is set.
     stopping.store(true);
-    std::lock_guard lock(worker_mutex);
-    if (worker.joinable()) worker.join();
+    for (int waited = 0; waited < 100 && active.load() > 0; ++waited) Sleep(50);
 }
 
 void FtpOps::SetCopied(std::vector<std::wstring> urls) {
