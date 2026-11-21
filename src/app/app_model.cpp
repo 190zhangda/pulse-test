@@ -21,6 +21,7 @@
 #include "../common/text_format.h"
 #include "../fs/drive_label.h"
 #include "../fs/drive_kind.h"
+#include "../fs/ftp_url.h"
 #include "../ui/drive_capacity.h"
 #include "../ops/clipboard.h"
 #include "../ops/source_listing.h"
@@ -968,6 +969,15 @@ std::wstring TabTitle(const std::wstring& path) {
         if (kind == L"tags") return l10n::Get(l10n::StringId::Tag);
     }
     // 别名: tabs, the sidebar and window lists show the folder's alias.
+    if (fs::IsFtpUrl(path)) {
+        // ftp://host/dir/file: the last path segment, or the host at the root.
+        fs::FtpUrl url;
+        if (fs::ParseFtpUrl(path, url)) {
+            const std::wstring leaf = fs::FtpLeafName(url.path);
+            if (!leaf.empty()) return leaf;
+            return url.host;
+        }
+    }
     if (std::wstring alias = AliasStore::Instance().Shown(path); !alias.empty()) return alias;
     std::wstring_view v = path;
     if (v.size() > 1 && v.back() == L'\\') v.remove_suffix(1);

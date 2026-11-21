@@ -6231,7 +6231,12 @@ void ApplyFtpCacheReady(AppState& s, const app::FtpCacheResult& result) {
         }
         return;
     }
-    if (!result.for_preview) return;  // a copy for a later stage: nothing to show
+    if (!result.for_preview) {
+        // Enter or a double click: the copy opens like a local file would. No
+        // shell verb can start an ftp:// path, so the download stands in for it.
+        ShellExecuteW(s.hwnd, L"open", result.local_path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        return;
+    }
     fs::FtpUrl parsed;
     if (!fs::ParseFtpUrl(result.url, parsed)) return;
     ui::QuickPreviewItem item;

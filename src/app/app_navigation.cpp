@@ -23,6 +23,7 @@
 #include "../fs/bitlocker_volume.h"
 #include "../fs/device_path.h"
 #include "../fs/ftp_url.h"
+#include "ftp_cache.h"
 #include "ftp_registry.h"
 #include "../fs/device_source.h"
 #include "../fs/wsl_path.h"
@@ -3255,7 +3256,11 @@ void OpenSelected(AppState& s, bool folder_in_new_window) {
         }
         std::wstring full = EntryFullPath(*tab, indices[0]);
         if (e.is_dir) open_folder(full);
-        else {
+        else if (fs::IsFtpUrl(full)) {
+            // A remote file has no local path to hand a shell verb: fetch a copy
+            // first and open that one (ApplyFtpCacheReady finishes the job).
+            FtpCache::Instance().Request(full, s.hwnd, false);
+        } else {
             s.ops.OpenWith(full);
             RecordRecentOpen(s, full, app::PlaceItemKind::File);
         }
@@ -3272,6 +3277,10 @@ void OpenSelected(AppState& s, bool folder_in_new_window) {
             continue;  // like folders: one at a time
         if (e.is_dir || (!e.link_target.empty() && e.link_target_is_dir)) continue;
         std::wstring full = EntryFullPath(*tab, index);
+        if (fs::IsFtpUrl(full)) {
+            FtpCache::Instance().Request(full, s.hwnd, false);
+            continue;
+        }
         if (!full.empty()) {
             s.ops.OpenWith(full);
             RecordRecentOpen(s, full, app::PlaceItemKind::File);
