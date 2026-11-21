@@ -47,6 +47,8 @@ private:
     void CreateOrganiserWindow();
     void DestroyOrganiserWindow();
     void PreviewOrganiserPath();
+    // Close whatever is showing and open this path as the Space preview.
+    bool ShowSpacePreview(const std::wstring& path);
     static LRESULT CALLBACK OrganiserWindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam);
     HANDLE thread_ = nullptr;
     std::atomic<DWORD> thread_id_{0};
@@ -74,6 +76,12 @@ private:
     // message sent by another process.
     HWND organiser_window_ = nullptr;
     std::wstring organiser_path_;
+    // Set while a desktop Space press waits for the organiser's message: the
+    // shell's own idea of the desktop selection is stale under an organiser, so it
+    // is only used when the message never arrives.
+    ULONGLONG desktop_wait_until_ = 0;
+    ULONGLONG desktop_wait_press_at_ = 0;
+    HWND desktop_wait_foreground_ = nullptr;
     // WM_COPYDATA arrives on the hook thread's own message loop, but the state it
     // fills is read from that same thread's loop afterwards; the lock keeps the
     // window procedure honest if the organiser ever sends from another thread.

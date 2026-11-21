@@ -36,6 +36,10 @@ constexpr UINT kOrganiserMessage = WM_APP + 304;
 // views and the accessibility tree all come back empty while its own icons work.
 constexpr wchar_t kOrganiserClass[] = L"SeerWindowClass";
 constexpr ULONG_PTR kOrganiserDataId = 5000;
+// How long a desktop Space press waits for the organiser's message before falling
+// back to the shell. The organiser publishes the icon from its own keyboard hook,
+// so the message normally arrives within a few milliseconds of the key.
+constexpr uint64_t kOrganiserGraceMs = 700;
 // Polls the cursor for hover preview. Coarse enough to stay cheap, fine enough
 // that the settle delay feels immediate.
 constexpr UINT_PTR kHoverTimer = 2;
@@ -536,11 +540,51 @@ void QuickLookHotkey::Stop() {
     // shutdown handshake, and the hook thread may be blocked in a shell COM call.
 }
 
+namespace {
+// True while the shell still lists the desktop's icons itself. An organiser that
+// draws its own icons empties that list, which is exactly the case where the
+// shell's idea of "selected" can no longer be trusted.
+bool DesktopShowsOwnIcons() {
+    HWND def_view = nullptr;
+    for (HWND worker = FindWindowExW(nullptr, nullptr, L"WorkerW", nullptr); worker && !def_view;
+         worker = FindWindowExW(nullptr, worker, L"WorkerW", nullptr)) {
+        def_view = FindWindowExW(worker, nullptr, L"SHELLDLL_DefView", nullptr);
+    }
+    if (!def_view) {
+        const HWND progman = FindWindowW(L"Progman", nullptr);
+        if (progman) def_view = FindWindowExW(progman, nullptr, L"SHELLDLL_DefView", nullptr);
+    }
+    if (!def_view) return false;
+    const HWND list = FindWindowExW(def_view, nullptr, L"SysListView32", nullptr);
+    if (!list) return false;
+    return SendMessageW(list, LVM_GETITEMCOUNT, 0, 0) > 0;
+}
+} // namespace
+
 bool QuickLookHotkey::Preview(HWND foreground) {
     // ClassifyAt also recognises the desktop's icon layer when an icon organiser
     // draws it in a window of its own.
     const Surface surface = ClassifyAt(foreground);
     if (surface == Surface::None) return false;
+    // An icon organiser keeps the shell's view pointing at whatever it published
+    // last, so reading the selection here returns a stale file while the organiser
+    // is about to send the icon the user really acted on. With the organiser
+    // channel up and the shell's own icon list emptied, give that message a moment
+    // instead of guessing.
+    if (surface == Surface::Desktop && organiser_window_ && !DesktopShowsOwnIcons()) {
+        // The organiser's message can beat this queued post: the icon it publishes
+        // arrives on its own keyboard hook, which runs before the loop gets here.
+        // A preview opened moments ago is that answer, so nothing is waited for.
+        if (space_shown_at_ && GetTickCount64() - space_shown_at_ < kOrganiserGraceMs) {
+            diagnostics::runtime::Event("quick_look_desktop_answered", {{"organiser", 1}});
+            return true;
+        }
+        desktop_wait_press_at_ = GetTickCount64();
+        desktop_wait_until_ = desktop_wait_press_at_ + kOrganiserGraceMs;
+        desktop_wait_foreground_ = foreground;
+        diagnostics::runtime::Event("quick_look_organiser_wait", {{"grace_ms", kOrganiserGraceMs}});
+        return true;
+    }
     const std::wstring path = SelectedPath(foreground, surface);
     if (path.empty()) {
         // A swallowed Space with nothing to preview is the one case a bug report
@@ -553,6 +597,13 @@ bool QuickLookHotkey::Preview(HWND foreground) {
         // it just acted on. Reinjecting here would only send the key a second time.
         return surface == Surface::Desktop;
     }
+    if (!ShowSpacePreview(path)) return false;
+    diagnostics::runtime::TextEvent("quick_look_space_preview", {{"path", path}}, {{"previewed", 1}});
+    return true;
+}
+
+// Replace whatever is on screen with this path, and file it under the Space slot.
+bool QuickLookHotkey::ShowSpacePreview(const std::wstring& path) {
     // Any earlier preview (hover, or the one from a previous Space press) must be
     // replaced: leaving several Quick Look windows alive is what made Space appear
     // to show the file from a previous press instead of the one now selected.
@@ -564,7 +615,6 @@ bool QuickLookHotkey::Preview(HWND foreground) {
     space_process_ = process;
     space_path_ = path;
     space_shown_at_ = GetTickCount64();
-    diagnostics::runtime::TextEvent("quick_look_space_preview", {{"path", path}}, {{"previewed", 1}});
     return true;
 }
 
@@ -635,6 +685,31 @@ void QuickLookHotkey::CloseAllPreviews() {
 }
 
 void QuickLookHotkey::CheckHover() {
+    // A desktop Space press waits for the organiser's message. When it never
+    // arrives (an organiser that publishes nothing, or a desktop the organiser no
+    // longer owns), fall back to the shell's selection so Space still does
+    // something on such machines. This runs before the hover switch is consulted:
+    // it belongs to Space, not to hover.
+    if (desktop_wait_until_ && GetTickCount64() >= desktop_wait_until_) {
+        const HWND foreground = desktop_wait_foreground_;
+        const ULONGLONG press_at = desktop_wait_press_at_;
+        desktop_wait_until_ = 0;
+        desktop_wait_press_at_ = 0;
+        desktop_wait_foreground_ = nullptr;
+        // The organiser already answered this press (its message beat the grace
+        // timer), so the shell's stale idea of the selection must not replace the
+        // truthful preview that is already on screen.
+        if (space_shown_at_ >= press_at) {
+            diagnostics::runtime::Event("quick_look_desktop_answered", {{"organiser", 1}});
+        } else {
+            const std::wstring path = SelectedPath(foreground, Surface::Desktop);
+            const bool same = space_process_ && _wcsicmp(path.c_str(), space_path_.c_str()) == 0;
+            if (!path.empty() && !same && ShowSpacePreview(path)) {
+                diagnostics::runtime::TextEvent(
+                    "quick_look_desktop_fallback", {{"path", path}}, {{"previewed", 1}});
+            }
+        }
+    }
     // Hover has its own switch: with it off the poll still runs (the switch can be
     // turned back on without restarting the thread) but it must not touch a
     // preview that Space opened.
@@ -722,16 +797,14 @@ void QuickLookHotkey::CreateOrganiserWindow() {
     definition.lpszClassName = kOrganiserClass;
     if (!RegisterClassExW(&definition)) {
         const DWORD error = GetLastError();
-        if (error == ERROR_CLASS_ALREADY_EXISTS) {
-            // Another Seer style receiver already owns the class name. A window
-            // created now would call its procedure instead of ours, so the whole
-            // channel has to be left to that process rather than silently doing
-            // nothing.
+        // The hook thread is restarted whenever a switch changes, and the class it
+        // registered on the previous run is still registered for this process.
+        // ERROR_CLASS_ALREADY_EXISTS therefore means "ours, from before": the window
+        // below joins it as usual. Anything else is a real failure.
+        if (error != ERROR_CLASS_ALREADY_EXISTS) {
             diagnostics::runtime::Event("quick_look_organiser", {{"registered", 0}, {"error", error}});
             return;
         }
-        diagnostics::runtime::Event("quick_look_organiser", {{"registered", 0}, {"error", error}});
-        return;
     }
     // A plain (never shown) top level window rather than a message-only one: the
     // organiser looks the receiver up with FindWindow, which does not see
@@ -781,6 +854,10 @@ void QuickLookHotkey::PreviewOrganiserPath() {
         path.swap(organiser_path_);
     }
     if (path.empty()) return;
+    // The organiser answered, so the shell fallback timer is no longer needed.
+    desktop_wait_until_ = 0;
+    desktop_wait_press_at_ = 0;
+    desktop_wait_foreground_ = nullptr;
     // The same press can be answered twice: the lookup above reads the desktop's
     // selection from the shell and the organiser then publishes the very same
     // icon. Keeping the live preview when the path matches avoids a second process
@@ -789,13 +866,8 @@ void QuickLookHotkey::PreviewOrganiserPath() {
         diagnostics::runtime::Event("quick_look_organiser_preview", {{"previewed", 0}, {"duplicate", 1}});
         return;
     }
+    if (!ShowSpacePreview(path)) return;
     diagnostics::runtime::TextEvent("quick_look_organiser_preview", {{"path", path}}, {{"previewed", 1}});
-    CloseAllPreviews();
-    HANDLE process = nullptr;
-    if (!LaunchPreview(path, &process)) return;
-    space_process_ = process;
-    space_path_ = path;
-    space_shown_at_ = GetTickCount64();
 }
 
 DWORD WINAPI QuickLookHotkey::Thread(void* value) {
