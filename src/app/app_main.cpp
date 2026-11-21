@@ -3190,14 +3190,14 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_FTP_CACHE_READY: {
         std::unique_ptr<app::FtpCacheResult> result(
             reinterpret_cast<app::FtpCacheResult*>(lParam));
-        if (s && result) ApplyFtpCacheReady(*s, *result);
+        if (s && result) app::ApplyFtpCacheReady(*s, *result);
         return 0;
     }
 
     case WM_FTP_OPS_DONE: {
         std::unique_ptr<app::FtpOpResult> result(
             reinterpret_cast<app::FtpOpResult*>(lParam));
-        if (s && result) ApplyFtpOpsDone(*s, *result);
+        if (s && result) app::ApplyFtpOpsDone(*s, *result);
         return 0;
     }
 

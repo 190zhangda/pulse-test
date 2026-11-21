@@ -485,7 +485,7 @@ bool OpenServerAddressText(AppState& s, const std::wstring& text) {
     // ftp:// goes to the built-in client: not a UNC path, so Win32 cannot open it.
     fs::FtpUrl ftp;
     if (fs::ParseFtpUrl(text, ftp)) {
-        FtpRegistry::Instance().Remember(ftp);
+        app::FtpRegistry::Instance().Remember(ftp);
         NavigateTo(s, fs::FtpCanonicalText(ftp));
         return true;
     }

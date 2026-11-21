@@ -3259,7 +3259,7 @@ void OpenSelected(AppState& s, bool folder_in_new_window) {
         else if (fs::IsFtpUrl(full)) {
             // A remote file has no local path to hand a shell verb: fetch a copy
             // first and open that one (ApplyFtpCacheReady finishes the job).
-            FtpCache::Instance().Request(full, s.hwnd, false);
+            app::FtpCache::Instance().Request(full, s.hwnd, false);
         } else {
             s.ops.OpenWith(full);
             RecordRecentOpen(s, full, app::PlaceItemKind::File);
@@ -3278,7 +3278,7 @@ void OpenSelected(AppState& s, bool folder_in_new_window) {
         if (e.is_dir || (!e.link_target.empty() && e.link_target_is_dir)) continue;
         std::wstring full = EntryFullPath(*tab, index);
         if (fs::IsFtpUrl(full)) {
-            FtpCache::Instance().Request(full, s.hwnd, false);
+            app::FtpCache::Instance().Request(full, s.hwnd, false);
             continue;
         }
         if (!full.empty()) {

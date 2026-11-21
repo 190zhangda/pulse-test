@@ -6172,7 +6172,7 @@ void ToggleQuickPreview(AppState& s) {
     if (fs::IsFtpUrl(item.path)) {
         // A remote file: fetch a copy first, the preview opens when it lands
         // (ApplyFtpCacheReady). The window shows nothing meanwhile.
-        FtpCache::Instance().Request(item.path, s.hwnd, true);
+        app::FtpCache::Instance().Request(item.path, s.hwnd, true);
         return;
     }
     OpenQuickPreview(s, item, true);
