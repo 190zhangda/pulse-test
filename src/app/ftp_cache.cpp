@@ -48,6 +48,21 @@ void EnsureDirectory(const std::wstring& path) {
 
 }  // namespace
 
+// Opening a file hands it to another program, which may keep it open: give each
+// open its own name so a second one does not fail on a share violation.
+std::wstring FreeLocalPath(const std::wstring& directory, const std::wstring& leaf) {
+    std::wstring candidate = directory + L"\\" + leaf;
+    if (GetFileAttributesW(candidate.c_str()) == INVALID_FILE_ATTRIBUTES) return candidate;
+    const size_t dot = leaf.find_last_of(L'.');
+    const std::wstring stem = dot == std::wstring::npos ? leaf : leaf.substr(0, dot);
+    const std::wstring extension = dot == std::wstring::npos ? std::wstring() : leaf.substr(dot);
+    for (int attempt = 2; attempt < 100; ++attempt) {
+        candidate = directory + L"\\" + stem + L" (" + std::to_wstring(attempt) + L")" + extension;
+        if (GetFileAttributesW(candidate.c_str()) == INVALID_FILE_ATTRIBUTES) return candidate;
+    }
+    return candidate;
+}
+
 FtpCache& FtpCache::Instance() {
     static FtpCache cache;
     return cache;
@@ -88,8 +103,9 @@ bool FtpCache::Request(const std::wstring& url, HWND window, bool for_preview) {
     if (!window) return false;
 
     // A copy already on disk: answer at once, still through the message, so the
-    // caller has one path to maintain.
-    if (const std::wstring local = LocalCopy(url); !local.empty()) {
+    // caller has one path to maintain. Opening a file always fetches it again:
+    // the copy from an earlier visit may be older than what the server holds now.
+    if (const std::wstring local = for_preview ? LocalCopy(url) : std::wstring(); !local.empty()) {
         auto* result = new FtpCacheResult{url, local, 0, for_preview};
         if (!PostMessageW(window, WM_FTP_CACHE_READY, 0, reinterpret_cast<LPARAM>(result)))
             delete result;
@@ -103,7 +119,7 @@ bool FtpCache::Request(const std::wstring& url, HWND window, bool for_preview) {
         ++running_;
     }
     const std::wstring directory = DirectoryFor(url);
-    const std::wstring local = directory + L"\\" + LeafFor(url);
+    const std::wstring local = for_preview ? directory + L"\\" + LeafFor(url) : FreeLocalPath(directory, LeafFor(url));
     diagnostics::runtime::TextEvent("ftp_cache_request", {{"path", parsed.path}}, {{"preview", for_preview ? 1u : 0u}});
 
     std::thread worker([this, url, directory, local, window, for_preview] {
