@@ -230,7 +230,9 @@ struct AppCore {
     std::unique_ptr<app::ExplorerWindowTakeover> explorer_takeover;   // experimental (B站 #1 2b)
     std::unique_ptr<app::WinEHotkey> win_e_hotkey;
     // Space bar preview in File Explorer and on the desktop (quick_look_hotkey.h).
-    std::unique_ptr<app::QuickLookHotkey> quick_look_hotkey;
+    // Shared because the hook thread keeps its own reference, so the object can be
+    // handed off here and die on its own thread instead of during shutdown.
+    std::shared_ptr<app::QuickLookHotkey> quick_look_hotkey;
 
     // Cut state mirrored into list rows (ui.md §5.2 rule 6: 55% opacity).
     std::vector<std::wstring> cutPaths;

@@ -465,22 +465,44 @@ bool IsQuickLookWindow(HWND window) {
 QuickLookHotkey::QuickLookHotkey() {
     accept_injected_ = GetEnvironmentVariableW(L"PULSE_TEST_QUICK_LOOK_KEYS", nullptr, 0) > 0;
     hover_delay_ms_ = ReadHoverDelayMs();
-    thread_ = CreateThread(nullptr, 0, Thread, this, 0, nullptr);
-    if (!thread_) diagnostics::runtime::Event("quick_look_space", {{"enabled", 0}, {"error", GetLastError()}});
 }
-QuickLookHotkey::~QuickLookHotkey() { Stop(); }
+
+std::shared_ptr<QuickLookHotkey> QuickLookHotkey::Start() {
+    std::shared_ptr<QuickLookHotkey> hotkey(new QuickLookHotkey());
+    // The hook thread holds its own reference, so the object outlives Stop() and
+    // is destroyed by the thread once that thread has finished unwinding.
+    HANDLE thread = CreateThread(nullptr, 0, Thread, hotkey.get(), 0, nullptr);
+    if (!thread) {
+        diagnostics::runtime::Event("quick_look_space", {{"enabled", 0}, {"error", GetLastError()}});
+        return nullptr;
+    }
+    hotkey->thread_ = thread;
+    return hotkey;
+}
+
+QuickLookHotkey::~QuickLookHotkey() {
+    // Start() always leaves one reference with this thread while it runs; reaching
+    // the destructor means the thread already dropped it, so only the handle and a
+    // possibly lingering preview process are left to clean up.
+    if (thread_) CloseHandle(thread_);
+    if (hover_process_) {
+        TerminateProcess(hover_process_, 0);
+        CloseHandle(hover_process_);
+    }
+}
 
 void QuickLookHotkey::Stop() {
     stopping_ = true;
-    if (!thread_) return;
-    // The id exists only once the thread owns a message queue; posting WM_QUIT to
-    // zero would drop it and the join below would wait forever.
-    DWORD id = 0;
-    for (int attempt = 0; attempt < 500 && (id = thread_id_.load()) == 0; ++attempt) Sleep(1);
+    // Unhook here rather than on the hook thread: a low level keyboard hook stops
+    // producing callbacks the moment it is removed, which is what has to be true
+    // before this object can be left to die. The thread then only has to release
+    // its COM apartment and its reference.
+    if (HHOOK hook = hook_.exchange(nullptr)) UnhookWindowsHookEx(hook);
+    active_ = false;
+    const auto id = thread_id_.load();
     if (id) PostThreadMessageW(id, WM_QUIT, 0, 0);
-    WaitForSingleObject(thread_, INFINITE);
-    CloseHandle(thread_);
-    thread_ = nullptr;
+    // No join: the caller is a window procedure replying to the installer's
+    // shutdown handshake, and the hook thread may be blocked in a shell COM call.
 }
 
 bool QuickLookHotkey::Preview(HWND foreground) {
@@ -626,7 +648,10 @@ void QuickLookHotkey::ReinjectSpace() {
 }
 
 DWORD WINAPI QuickLookHotkey::Thread(void* value) {
-    auto& self = *static_cast<QuickLookHotkey*>(value);
+    // Hold a reference for the whole thread: Stop() never joins, so the object
+    // must stay alive until this function has finished its own teardown.
+    std::shared_ptr<QuickLookHotkey> keep = static_cast<QuickLookHotkey*>(value)->shared_from_this();
+    auto& self = *keep;
     MSG message{};
     PeekMessageW(&message, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
     self.thread_id_ = GetCurrentThreadId();
@@ -637,13 +662,22 @@ DWORD WINAPI QuickLookHotkey::Thread(void* value) {
         current_ = nullptr;
         return 0;
     }
-    self.hook_ = SetWindowsHookExW(WH_KEYBOARD_LL, Keyboard, GetModuleHandleW(nullptr), 0);
-    self.active_ = self.hook_ != nullptr;
+    // Stop() may have detached before this point; only publish the hook when it
+    // has not, so the two never disagree about who unhooks.
+    HHOOK created = SetWindowsHookExW(WH_KEYBOARD_LL, Keyboard, GetModuleHandleW(nullptr), 0);
+    if (self.stopping_) {
+        if (created) UnhookWindowsHookEx(created);
+        CoUninitialize();
+        current_ = nullptr;
+        return 0;
+    }
+    self.hook_ = created;
+    self.active_ = created != nullptr;
     diagnostics::runtime::Event("quick_look_space",
-        {{"enabled", self.active_.load()}, {"error", self.hook_ ? ERROR_SUCCESS : GetLastError()}});
+        {{"enabled", self.active_.load()}, {"error", created ? ERROR_SUCCESS : GetLastError()}});
     // Hover polling uses a timer on this thread's (hidden) message queue.
     SetTimer(nullptr, kHoverTimer, kHoverPollMs, nullptr);
-    while (self.hook_ && !self.stopping_ && GetMessageW(&message, nullptr, 0, 0) > 0) {
+    while (self.hook_.load() != nullptr && !self.stopping_ && GetMessageW(&message, nullptr, 0, 0) > 0) {
         if (!message.hwnd && message.message == kPreviewMessage) {
             if (!self.Preview(reinterpret_cast<HWND>(message.wParam))) self.ReinjectSpace();
         } else if (!message.hwnd && message.message == WM_TIMER && message.wParam == kHoverTimer) {
@@ -655,10 +689,7 @@ DWORD WINAPI QuickLookHotkey::Thread(void* value) {
     }
     KillTimer(nullptr, kHoverTimer);
     self.CloseHoverPreview();
-    if (self.hook_) {
-        UnhookWindowsHookEx(self.hook_);
-        self.hook_ = nullptr;
-    }
+    if (HHOOK hook = self.hook_.exchange(nullptr)) UnhookWindowsHookEx(hook);
     CoUninitialize();
     self.active_ = false;
     current_ = nullptr;
