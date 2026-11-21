@@ -54,6 +54,43 @@ FtpError FtpRegistry::MapStatus(fs::FtpStatus status) {
     return FtpError::Network;
 }
 
+FtpError FtpRegistry::Run(const std::wstring& url, const char* what,
+                          const std::function<bool()>& cancelled,
+                          const std::function<fs::FtpStatus(fs::FtpClient&, std::wstring&)>& body) {
+    fs::FtpUrl parsed;
+    if (!fs::ParseFtpUrl(url, parsed)) return FtpError::BadUrl;
+    if (cancelled && cancelled()) return FtpError::Cancelled;
+
+    std::lock_guard lock(mutex_);
+    const std::shared_ptr<Server> server = ServerFor(parsed);
+    std::wstring detail;
+    if (!server->logged_in) {
+        const fs::FtpStatus connected =
+            server->client.Connect(server->host, server->port, server->user, server->password, &detail);
+        if (connected != fs::FtpStatus::Ok) {
+            server->client.Close();
+            diagnostics::runtime::TextEvent("ftp_connect_failed", {{"host", server->host}},
+                                            {{"status", static_cast<uint64_t>(connected)}});
+            return MapStatus(connected);
+        }
+        server->logged_in = true;
+        diagnostics::runtime::Event("ftp_connected", {{"port", static_cast<uint64_t>(server->port)}});
+    }
+
+    const fs::FtpStatus status = body(server->client, detail);
+    if (status != fs::FtpStatus::Ok) {
+        if (status != fs::FtpStatus::Cancelled && status != fs::FtpStatus::NotFound) {
+            server->client.Close();
+            server->logged_in = false;
+        }
+        diagnostics::runtime::TextEvent(what, {{"path", parsed.path}},
+                                        {{"status", static_cast<uint64_t>(status)}});
+        return MapStatus(status);
+    }
+    diagnostics::runtime::TextEvent(what, {{"path", parsed.path}}, {{"ok", 1}});
+    return FtpError::None;
+}
+
 void FtpRegistry::Remember(const fs::FtpUrl& url) {
     if (!url.valid) return;
     std::lock_guard lock(mutex_);
@@ -103,6 +140,82 @@ FtpError FtpRegistry::Download(const std::wstring& url, const std::wstring& loca
     diagnostics::runtime::TextEvent("ftp_downloaded", {{"path", parsed.path}}, {{"ok", 1}});
     return FtpError::None;
 }
+FtpError FtpRegistry::Upload(const std::wstring& local, const std::wstring& remote,
+                             const std::function<bool()>& cancelled) {
+    fs::FtpUrl target;
+    if (!fs::ParseFtpUrl(remote, target)) return FtpError::BadUrl;
+    return Run(remote, "ftp_upload", cancelled,
+               [&](fs::FtpClient& client, std::wstring& detail) {
+                   return client.Upload(local, target.path, cancelled, {}, &detail);
+               });
+}
+
+FtpError FtpRegistry::RemoveTree(const std::wstring& url, const std::function<bool()>& cancelled) {
+    // Depth first: a basic server deletes empty directories only, so the
+    // children have to be gone before the folder itself is removed.
+    std::function<FtpError(const std::wstring&)> remove = [&](const std::wstring& target) -> FtpError {
+        std::vector<fs::DirEntry> rows;
+        const FtpError listed = ListFolder(target, rows, cancelled);
+        if (listed != FtpError::None) return listed;
+        for (const fs::DirEntry& row : rows) {
+            if (cancelled && cancelled()) return FtpError::Cancelled;
+            if (row.is_dir) {
+                const FtpError inner = remove(row.full_path);
+                if (inner != FtpError::None) return inner;
+                continue;
+            }
+            fs::FtpUrl file;
+            if (!fs::ParseFtpUrl(row.full_path, file)) continue;
+            const FtpError removed =
+                Run(row.full_path, "ftp_remove", cancelled,
+                    [&](fs::FtpClient& client, std::wstring& detail) {
+                        return client.Remove(file.path, &detail);
+                    });
+            if (removed != FtpError::None && removed != FtpError::NotFound) return removed;
+        }
+        fs::FtpUrl folder;
+        if (!fs::ParseFtpUrl(target, folder)) return FtpError::BadUrl;
+        const FtpError removed =
+            Run(target, "ftp_rmdir", cancelled,
+                [&](fs::FtpClient& client, std::wstring& detail) {
+                    return client.RemoveDirectory(folder.path, &detail);
+                });
+        return removed == FtpError::NotFound ? FtpError::None : removed;
+    };
+    return remove(url);
+}
+
+FtpError FtpRegistry::RemoveFile(const std::wstring& url, const std::function<bool()>& cancelled) {
+    fs::FtpUrl target;
+    if (!fs::ParseFtpUrl(url, target)) return FtpError::BadUrl;
+    return Run(url, "ftp_remove", cancelled,
+               [&](fs::FtpClient& client, std::wstring& detail) {
+                   return client.Remove(target.path, &detail);
+               });
+}
+
+FtpError FtpRegistry::Rename(const std::wstring& url, const std::wstring& new_name,
+                             const std::function<bool()>& cancelled) {
+    fs::FtpUrl target;
+    if (!fs::ParseFtpUrl(url, target)) return FtpError::BadUrl;
+    if (new_name.empty()) return FtpError::Denied;
+    fs::FtpUrl to = target;
+    to.path = fs::FtpJoinPath(fs::FtpParentPath(target.path), new_name);
+    return Run(url, "ftp_rename", cancelled,
+               [&](fs::FtpClient& client, std::wstring& detail) {
+                   return client.Rename(target.path, to.path, &detail);
+               });
+}
+
+FtpError FtpRegistry::MakeDirectory(const std::wstring& url, const std::function<bool()>& cancelled) {
+    fs::FtpUrl target;
+    if (!fs::ParseFtpUrl(url, target)) return FtpError::BadUrl;
+    return Run(url, "ftp_mkdir", cancelled,
+               [&](fs::FtpClient& client, std::wstring& detail) {
+                   return client.MakeDirectory(target.path, &detail);
+               });
+}
+
 bool FtpRegistry::FolderWritable(const std::wstring& url) const {
     fs::FtpUrl parsed;
     return fs::ParseFtpUrl(url, parsed);

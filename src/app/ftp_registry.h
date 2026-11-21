@@ -53,6 +53,16 @@ public:
     // server waits for it: one control connection, one command at a time.
     FtpError Download(const std::wstring& url, const std::wstring& local,
                       const std::function<bool()>& cancelled);
+    // Writes: one command each, on the same control connection as the
+    // listing. `local` is a Windows path, `remote` an ftp:// URL.
+    FtpError Upload(const std::wstring& local, const std::wstring& remote,
+                    const std::function<bool()>& cancelled);
+    // Remote directory tree, contents first (basic servers refuse a full RMD).
+    FtpError RemoveTree(const std::wstring& url, const std::function<bool()>& cancelled);
+    FtpError RemoveFile(const std::wstring& url, const std::function<bool()>& cancelled);
+    FtpError Rename(const std::wstring& url, const std::wstring& new_name,
+                    const std::function<bool()>& cancelled);
+    FtpError MakeDirectory(const std::wstring& url, const std::function<bool()>& cancelled);
     // A folder that takes a paste (an FTP folder always does: the server may
     // still refuse, which the operation reports).
     bool FolderWritable(const std::wstring& url) const;
@@ -75,6 +85,11 @@ private:
     std::shared_ptr<Server> ServerFor(const fs::FtpUrl& url);
     static std::wstring KeyFor(const fs::FtpUrl& url);
     static FtpError MapStatus(fs::FtpStatus status);
+    // Logs in when needed and runs `body` on that connection. A failure other
+    // than NotFound/Cancelled drops the connection: the server may be out of
+    // step with us, and the next call is better off reconnecting.
+    FtpError Run(const std::wstring& url, const char* what, const std::function<bool()>& cancelled,
+                 const std::function<fs::FtpStatus(fs::FtpClient&, std::wstring&)>& body);
 
     std::mutex mutex_;
     std::map<std::wstring, std::shared_ptr<Server>> servers_;

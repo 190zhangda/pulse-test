@@ -17,6 +17,7 @@ namespace pulse::app { bool RunMediaColumnResizeCapture(); }
 #include "../ui/thumbnail_retry_timer.h"
 #include "drive_eject_ui.h"
 #include "ftp_cache.h"
+#include "ftp_ops.h"
 #include "ftp_registry.h"
 #include "app_diagnostics.h"
 #include "partial_redraw.h"
@@ -1209,6 +1210,7 @@ static void HandOffAtExit(AppState& s, HWND hwnd) {
     pulse::app::ai::StopAiService();
     s.ops.Stop();
     // The FTP fetches stop polling their cancel flag; the clients close.
+    app::FtpOps::Instance().Shutdown();
     app::FtpCache::Instance().Shutdown();
     app::FtpRegistry::Instance().DropAll();
     ops::ShutdownElevatedTransferHelper();
@@ -3189,6 +3191,13 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         std::unique_ptr<app::FtpCacheResult> result(
             reinterpret_cast<app::FtpCacheResult*>(lParam));
         if (s && result) ApplyFtpCacheReady(*s, *result);
+        return 0;
+    }
+
+    case WM_FTP_OPS_DONE: {
+        std::unique_ptr<app::FtpOpResult> result(
+            reinterpret_cast<app::FtpOpResult*>(lParam));
+        if (s && result) ApplyFtpOpsDone(*s, *result);
         return 0;
     }
 

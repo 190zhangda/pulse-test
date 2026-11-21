@@ -10,6 +10,8 @@
 #include "address_path_open.h"
 #include "filter_tag_complete.h"
 #include "folder_alias.h"
+#include "ftp_ops.h"
+#include "../fs/ftp_url.h"
 #include "keymap.h"
 #include "tab_shortcuts.h"
 #include "window_overview_ui.h"
@@ -860,7 +862,28 @@ void HideRenameOverlay(AppState& s, bool commit) {
             // As the note under the field said: trimmed, numbered if taken.
             const std::wstring target = RenameTarget(*tab, index, buf);
             const std::wstring shell_id = tab->EntryAt(index).shell_id;
-            if (fs::IsDevicePath(full) && !target.empty() && target != tab->EntryAt(index).name) {
+            if (fs::IsFtpUrl(full)) {
+                // A server row: FtpOps renames it. The name is only trimmed
+                // here 鈥?whether it is free is the server's answer, reported
+                // by the banner when it says no.
+                std::wstring wanted(buf);
+                while (!wanted.empty() && (wanted.back() == L' ' || wanted.back() == L'.'))
+                    wanted.pop_back();
+                if (!wanted.empty() && wanted != tab->EntryAt(index).name) {
+                    app::FtpOpRequest request;
+                    request.kind = app::FtpOpKind::Rename;
+                    request.folder = tab->current_path;
+                    request.sources.push_back(full);
+                    request.new_name = wanted;
+                    if (app::FtpOps::Instance().Submit(std::move(request), s.hwnd)) {
+                        tab->pending_selected_name = wanted;
+                        tab->pending_selected_names = { wanted };
+                        tab->pending_ensure_selection_visible = true;
+                        tab->pending_selection_revision = tab->selection_revision;
+                        tab->held_renames.push_back({ tab->EntryAt(index).name, wanted });
+                    }
+                }
+            } else if (fs::IsDevicePath(full) && !target.empty() && target != tab->EntryAt(index).name) {
                 // A phone file: the shell host renames it (no undo, as in Explorer).
                 if (s.ops.RenameShellItem(shell_id, target)) {
                     tab->pending_selected_name = target;

@@ -10,6 +10,7 @@
 #include "tag_color_commands.h"
 #include "picker_appearance.h"
 #include "ftp_cache.h"
+#include "ftp_ops.h"
 #include "ftp_registry.h"
 #include "../fs/ftp_url.h"
 #include "git_ui.h"
@@ -214,6 +215,16 @@ void CreateNewItem(AppState& s, bool folder) {
         CreateDeviceFolder(s, *tab);
         return;
     }
+    if (tab && fs::IsFtpUrl(tab->current_path)) {
+        // A server has no local template to copy, so only a folder is made.
+        if (!folder) return;
+        app::FtpOpRequest request;
+        request.kind = app::FtpOpKind::MakeDirectory;
+        request.folder = tab->current_path;
+        request.new_name = UniqueRemoteName(*tab, l10n::Get(l10n::StringId::NewFolder));
+        app::FtpOps::Instance().Submit(std::move(request), s.hwnd);
+        return;
+    }
     if (!tab || tab->current_path.empty() || fs::IsVirtualPath(tab->current_path) || tab->net_readonly ||
         app::IsUncServerRoot(tab->current_path))
         return;
@@ -240,8 +251,26 @@ void CreateNewItem(AppState& s, bool folder) {
 
 namespace {
 bool CanCreateHere(const app::Tab* tab) {
-    return tab && !tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path) && !tab->net_readonly &&
+    return tab && !tab->current_path.empty() && !tab->net_readonly &&
+        (!fs::IsVirtualPath(tab->current_path) || fs::IsFtpUrl(tab->current_path)) &&
         !app::IsUncServerRoot(tab->current_path);  // \\server lists shares, not files
+}
+
+// A name the remote folder's rows do not use yet: "新建文件夹", then " (2)", ...
+std::wstring UniqueRemoteName(const app::Tab& tab, const std::wstring& stem) {
+    std::wstring name = stem;
+    for (int attempt = 2; attempt < 1000; ++attempt) {
+        bool taken = false;
+        for (size_t index = 0; index < tab.EntryCount(); ++index) {
+            if (_wcsicmp(tab.EntryAt(index).name.c_str(), name.c_str()) == 0) {
+                taken = true;
+                break;
+            }
+        }
+        if (!taken) return name;
+        name = stem + L" (" + std::to_wstring(attempt) + L")";
+    }
+    return name;
 }
 
 // Paste also reaches a phone folder (the shell host drops the clipboard on it).
@@ -6219,6 +6248,31 @@ void ApplyFtpCacheReady(AppState& s, const app::FtpCacheResult& result) {
     // on the server, so the preview offers no write commands.
     item.read_only = true;
     OpenQuickPreview(s, item, true);
+}
+
+void ApplyFtpOpsDone(AppState& s, const app::FtpOpsResult& result) {
+    if (result.error != 0) {
+        using I = l10n::StringId;
+        I message = I::DirectoryUnavailable;
+        if (static_cast<app::FtpError>(result.error) == app::FtpError::Auth)
+            message = I::IfTheServerAsksYouToSignInEnterTheUserNameAndPasswordInTheWi;
+        if (app::Tab* tab = ActiveTab(s)) {
+            tab->banner_title = l10n::Get(I::CannotOpen);
+            tab->banner_message = l10n::Get(message);
+        }
+        pulse::diagnostics::runtime::Event("ftp_op_error", {{"error", static_cast<uint64_t>(result.error)}});
+    }
+    app::Tab* tab = ActiveTab(s);
+    if (tab && _wcsicmp(tab->current_path.c_str(), result.folder.c_str()) == 0) {
+        if (!result.created_name.empty()) {
+            tab->pending_selected_name = result.created_name;
+            tab->pending_selected_names = { result.created_name };
+            tab->pending_ensure_selection_visible = true;
+            tab->pending_selection_revision = tab->selection_revision;
+        }
+        RefreshActiveTab(s, RefreshReason::OperationCompleted);
+    }
+    if (s.hwnd) InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
 void NavigateQuickPreview(AppState& s, int direction) {

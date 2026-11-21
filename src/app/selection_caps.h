@@ -10,6 +10,7 @@
 #include "places.h"
 #include "app_network_locations.h"
 #include "../fs/fs_enum.h"
+#include "../fs/ftp_url.h"
 #include <windows.h>
 #include <string>
 #include <string_view>
@@ -25,6 +26,7 @@ enum class SelectionKind : uint8_t {
     NetworkPlaces,  // pulse:networks (pinned and system network locations)
     Recycle,        // Recycle Bin items
     Device,         // a phone's files and storages: Explorer's verbs via the shell host
+    Ftp,            // an ftp:// folder: written through FtpOps, no shell ids
 };
 
 struct SelectionCaps {
@@ -85,6 +87,15 @@ inline SelectionCaps ComputeSelectionCaps(const Tab& tab, const PlacesCatalog* p
     if (recycle != RecycleSelection::None) {
         caps.kind = SelectionKind::Recycle;
         caps.del = recycle == RecycleSelection::All;
+        return caps;
+    }
+    if (fs::IsFtpUrl(tab.current_path)) {
+        // Remote rows: the write commands run through FtpOps. They carry no
+        // Win32 path and no shell id, so copy out of a server (a download) is
+        // a separate route and comes later.
+        caps.kind = SelectionKind::Ftp;
+        caps.del = true;
+        caps.rename = count == 1;
         return caps;
     }
     std::wstring kind;

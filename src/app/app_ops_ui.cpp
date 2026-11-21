@@ -29,6 +29,8 @@
 #include "link_resolve.h"
 #include "locked_item_prompt.h"
 #include "selection_caps.h"
+#include "ftp_ops.h"
+#include "../fs/ftp_url.h"
 #include "app_commands.h"
 #include "reopen_closed.h"
 #include "paste_source.h"
@@ -352,6 +354,21 @@ void HandleTrayMessage(AppState& s, UINT message) {
 // Ctrl+C no longer stages.
 void PasteIntoCurrent(AppState& s) {
     app::Tab* tab = ActiveTab(s);
+    if (tab && fs::IsFtpUrl(tab->current_path)) {
+        // Paste into a server: the clipboard's local files go up as one FtpOps
+        // request. Shell-virtual items (a zip's files) and a remote-to-remote
+        // paste are not taken here.
+        ops::ClipboardData files;
+        if (!ops::ReadClipboard(files) || files.paths.empty()) return;
+        app::FtpOpRequest request;
+        request.kind = app::FtpOpKind::Upload;
+        request.folder = tab->current_path;
+        request.sources = files.paths;
+        const bool submitted = app::FtpOps::Instance().Submit(std::move(request), s.hwnd);
+        pulse::diagnostics::runtime::Event("ftp_paste", {{"submitted", submitted ? 1ull : 0ull},
+            {"items", static_cast<uint64_t>(files.paths.size())}});
+        return;
+    }
     if (IsDeviceTab(tab)) {
         // A phone folder: files or another phone's items go in as a Pulse
         // task (Explorer's engine, Pulse's progress and conflict dialog).
@@ -441,6 +458,38 @@ void DeleteSelected(AppState& s, bool permanent) {
     if(DeferContentSelection(s,[=](AppState& v){DeleteSelected(v,permanent);})) return;
     app::Tab* tab = ActiveTab(s);
     if (!tab) return;
+    if (fs::IsFtpUrl(tab->current_path)) {
+        // A server's rows: no Recycle Bin behind them, so Del removes them for
+        // good (a folder's contents first), after the same confirmation.
+        std::vector<std::wstring> targets;
+        std::vector<uint8_t> dirs;
+        if (tab->snapshot) {
+            for (int index : tab->SelectedIndices()) {
+                if (index < 0 || index >= static_cast<int>(tab->EntryCount())) continue;
+                const fs::DirEntry& entry = tab->EntryAt(static_cast<size_t>(index));
+                if (entry.full_path.empty()) continue;
+                targets.push_back(entry.full_path);
+                dirs.push_back(entry.is_dir ? 1 : 0);
+            }
+        }
+        if (targets.empty()) return;
+        ui::ConfirmDialogSpec confirm;
+        confirm.title = l10n::Get(l10n::StringId::PermanentDelete);
+        wchar_t message[256]{};
+        swprintf_s(message, l10n::Get(l10n::StringId::RecycleDeleteConfirmFormat).c_str(),
+                   targets.size());
+        confirm.message = message;
+        confirm.confirm_text = l10n::Get(l10n::StringId::PermanentDelete);
+        confirm.danger = true;
+        if (!ui::ShowConfirmDialog(s.hwnd, confirm, s.darkMode, s.accentColor)) return;
+        app::FtpOpRequest request;
+        request.kind = app::FtpOpKind::Delete;
+        request.folder = tab->current_path;
+        request.sources = std::move(targets);
+        request.dirs = std::move(dirs);
+        app::FtpOps::Instance().Submit(std::move(request), s.hwnd);
+        return;
+    }
     if (app::RecycleSelectionOf(*tab) == app::RecycleSelection::Mixed) return;
     if (IsRecycleTab(tab) || app::RecycleSelectionOf(*tab) == app::RecycleSelection::All) {
         std::vector<std::wstring> paths;

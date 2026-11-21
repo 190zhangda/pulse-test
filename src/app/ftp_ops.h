@@ -1,0 +1,56 @@
+// ftp_ops.h - Writing to an ftp:// folder: upload, delete, rename, new folder.
+//
+// The remote side has no file system Pulse can hand to the operations engine,
+// so these run here instead: one background thread, one request at a time, and
+// a message back to the window that asked (WM_FTP_OPS_DONE) so the view can
+// refresh and report what went wrong.
+#pragma once
+#include <windows.h>
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace pulse::app {
+
+enum class FtpOpKind : uint8_t {
+    Upload,        // sources = local paths (files or folders), folder = the ftp folder
+    Delete,        // sources = remote URLs
+    Rename,        // sources[0] = remote URL, new_name = the new leaf name
+    MakeDirectory  // folder + new_name: the folder to create
+};
+
+struct FtpOpRequest {
+    FtpOpKind kind = FtpOpKind::Upload;
+    std::wstring folder;              // the ftp folder the view shows (refresh target)
+    std::vector<std::wstring> sources;
+    std::vector<uint8_t> dirs;        // Delete: aligned with sources, 1 = folder
+    std::wstring new_name;
+};
+
+// What the UI needs to react: which folder was written, how it went, and the
+// row to select afterwards.
+struct FtpOpResult {
+    std::wstring folder;
+    uint8_t error = 0;      // app::FtpError
+    size_t done = 0;
+    size_t failed = 0;
+    std::wstring created_name;  // a new folder: the row to select
+};
+
+class FtpOps {
+public:
+    static FtpOps& Instance();
+
+    // Runs `request` on a background thread and posts WM_FTP_OPS_DONE to
+    // `window` with a heap-allocated FtpOpResult. False when the request makes
+    // no sense (nothing to do), so the caller can skip arming a selection.
+    bool Submit(FtpOpRequest request, HWND window);
+    // Waits for the running request (the app is going away).
+    void Shutdown();
+
+private:
+    FtpOps() = default;
+};
+
+}  // namespace pulse::app
