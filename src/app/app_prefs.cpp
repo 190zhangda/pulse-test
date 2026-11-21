@@ -67,10 +67,11 @@ void AppPrefs::ResetToDefaults() {
     integration_folders_compat = false;
     shell_tag_menu = false;
     shell_quick_look = false;
-    // Sub-switches of the row above: an older file has neither key, so both start
-    // out equal to the single switch, which is exactly what it used to mean.
-    shell_quick_look_space = false;
-    shell_quick_look_hover = false;
+    // Sub-switches of the row above. An older file has neither key and FromJson
+    // reads a missing key as on, so the defaults have to say the same: a rebuild
+    // that only writes one of the two keys must not leave Space switched off.
+    shell_quick_look_space = true;
+    shell_quick_look_hover = true;
     verify_copies = false;
     show_status_performance = false;
     show_pinned_tab_names = true;
