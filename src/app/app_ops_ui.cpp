@@ -905,7 +905,7 @@ void CollectToTray(AppState& s, bool move_intent) {
         std::vector<std::wstring> urls;
         for (int index : tab->SelectedIndices()) {
             if (index < 0 || index >= static_cast<int>(tab->EntryCount())) continue;
-            const std::wstring& full = tab->EntryAt(static_cast<size_t>(index)).full_path;
+            const std::wstring full = tab->EntryAt(static_cast<size_t>(index)).full_path;
             if (!full.empty()) urls.push_back(full);
         }
         if (urls.empty()) return;
