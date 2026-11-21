@@ -7,9 +7,11 @@
 #include "link_resolve.h"
 #include "cloud_roots.h"
 #include "device_registry.h"
+#include "ftp_registry.h"
 #include "this_pc_devices.h"
 #include "../common/localization.h"
 #include "../fs/fs_enum.h"
+#include "../fs/ftp_url.h"
 #include "../fs/bitlocker_volume.h"
 #include "../fs/bounded_enumeration.h"
 #include "../fs/drive_kind.h"
@@ -294,6 +296,21 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
             res.cancelled = cancelled();
             res.error = !res.cancelled;
             res.device_error = static_cast<uint8_t>(error);
+            res.snapshot = nullptr;
+            return res;
+        }
+    } else if (fs::IsFtpUrl(item.path)) {
+        // An ftp:// folder: listed over the control connection on this thread.
+        const app::FtpError error = app::FtpRegistry::Instance().ListFolder(
+            item.path, *entries, [&] { return cancelled(); });
+        if (error == app::FtpError::Cancelled) {
+            res.cancelled = true;
+            return res;
+        }
+        if (error != app::FtpError::None) {
+            res.cancelled = cancelled();
+            res.error = !res.cancelled;
+            res.ftp_error = static_cast<uint8_t>(error);
             res.snapshot = nullptr;
             return res;
         }

@@ -22,6 +22,8 @@
 #include "dup_finder.h"
 #include "../fs/bitlocker_volume.h"
 #include "../fs/device_path.h"
+#include "../fs/ftp_url.h"
+#include "ftp_registry.h"
 #include "../fs/device_source.h"
 #include "../fs/wsl_path.h"
 #include "device_registry.h"
@@ -977,6 +979,7 @@ void MaybePrefetchSearchPage(AppState& s) {
     if (!tab || tab->search_content_stopped || tab->loading || tab->search_loading_more ||
         tab->search_next_offset >= tab->search_total ||
         tab->search_awaiting_content || tab->search_content_active) return;
+
     std::wstring kind, rest;
     if (!app::ParsePulsePath(tab->current_path, &kind, &rest) ||
         (kind != L"search" && kind != L"saved-search")) return;
@@ -1011,6 +1014,7 @@ bool RequestAllSearchResults(AppState& s, app::Tab& tab) {
     if (tab.loading || tab.search_loading_more || tab.pending_generation) return true;
     const size_t want = (std::min)(index::kSearchPageCap, tab.search_total);
     if (tab.search_next_offset >= want) return false;
+
     std::wstring kind, rest;
     if (!app::ParsePulsePath(tab.current_path, &kind, &rest)) return false;
     index::Query query;
@@ -1047,6 +1051,7 @@ void CancelActiveContentSearch(AppState& s, app::Tab& tab) {
     tab.loading = false;
     tab.pending_generation = 0;
     MarkContentSearchStopped(tab);
+
     std::wstring kind, rest;
     if (app::ParsePulsePath(tab.current_path, &kind, &rest) && kind == L"search")
         SetQuerySearchTitle(tab, rest, tab.search_total);
@@ -1171,6 +1176,19 @@ void LoadVirtualView(AppState& s, app::Tab& tab, const std::wstring& path, PathL
     tab.tag_refine.clear();
     tab.tag_locations.clear();
     SyncVisibleWatches(s);
+
+    fs::FtpUrl ftp;
+    if (fs::ParseFtpUrl(path, ftp)) {
+        // An ftp:// folder: listed on the worker thread (WorkerPool -> FtpRegistry).
+        tab.virtual_title = fs::FtpCanonicalText(ftp);
+        tab.loading = true;
+        tab.SetSnapshot(nullptr);
+        tab.banner_title.clear();
+        tab.banner_message.clear();
+        tab.pending_generation = s.worker.Refresh(
+            path, tab.sort_column, tab.sort_direction, tab.EffectiveGroup(), nullptr, tab.EffectiveFolderSort());
+        return;
+    }
 
     std::wstring kind, rest;
     app::ParsePulsePath(path, &kind, &rest);
@@ -1673,7 +1691,17 @@ static bool ApplyWorkerResultToWindow(AppState& s, app::WorkResult& res, bool ag
             tab->banner_message = tab->snapshot
                 ? l10n::Get(l10n::StringId::CachedReadOnly)
                 : l10n::Get(l10n::StringId::DirectoryUnavailable);
-            if (res.device_error) {
+            if (res.ftp_error) {
+                // An ftp:// folder that could not be listed: the server said no.
+                using I = l10n::StringId;
+                I message = I::DirectoryUnavailable;
+                if (static_cast<app::FtpError>(res.ftp_error) == app::FtpError::Auth)
+                    message = I::IfTheServerAsksYouToSignInEnterTheUserNameAndPasswordInTheWi;
+                tab->net_readonly = true;
+                tab->banner_title = l10n::Get(I::CannotOpen);
+                tab->banner_message = l10n::Get(message);
+                if (!tab->snapshot) tab->SetSnapshot(std::make_shared<std::vector<fs::DirEntry>>());
+            } else if (res.device_error) {
                 // A phone folder that could not be listed: say what to do.
                 using I = l10n::StringId;
                 I title = I::CannotOpen, message = I::DeviceFolderFailed;
@@ -3314,6 +3342,17 @@ void GoUp(AppState& s) {
     if (!tab) return;
     if (IsRecycleTab(tab)) {
         NavigateTo(s, L"");
+        return;
+    }
+    fs::FtpUrl ftp_up;
+    if (fs::ParseFtpUrl(tab->current_path, ftp_up)) {
+        // Up inside one server; the server root has nothing above it.
+        const std::wstring parent = fs::FtpParentPath(ftp_up.path);
+        if (parent != ftp_up.path) {
+            fs::FtpUrl target = ftp_up;
+            target.path = parent;
+            NavigateTo(s, fs::FtpCanonicalText(target));
+        }
         return;
     }
     if (fs::IsDevicePath(tab->current_path)) {

@@ -52,6 +52,9 @@ struct FtpSettings {
 
 // Progress callbacks return false to stop the transfer (the caller's Cancel).
 using FtpProgress = std::function<bool(uint64_t transferred, uint64_t total)>;
+// Cancel callbacks return true to stop: polled between replies and during a
+// transfer. An empty one means the caller cannot cancel.
+using FtpCancel = std::function<bool()>;
 
 class FtpClient {
 public:
@@ -74,16 +77,16 @@ public:
     // Rows of one folder. The path is tried as "LIST <path>", then as
     // "CWD <path>" + "LIST"; names come back decoded from UTF-8.
     FtpStatus List(const std::wstring& path, std::vector<FtpItem>& out,
-                   const std::atomic_bool* cancelled, std::wstring* detail);
+                   const FtpCancel& cancelled, std::wstring* detail);
     // SIZE + MDTM for one file (directory sizes are not reported by FTP).
     FtpStatus Stat(const std::wstring& path, uint64_t* size, FILETIME* mtime, bool* has_mtime,
                    std::wstring* detail);
 
     FtpStatus Download(const std::wstring& remote, const std::wstring& local,
-                       const std::atomic_bool* cancelled, const FtpProgress& progress,
+                       const FtpCancel& cancelled, const FtpProgress& progress,
                        std::wstring* detail);
     FtpStatus Upload(const std::wstring& local, const std::wstring& remote,
-                     const std::atomic_bool* cancelled, const FtpProgress& progress,
+                     const FtpCancel& cancelled, const FtpProgress& progress,
                      std::wstring* detail);
     // A file, or a directory (which the server must have empty or handle
     // recursively; basic FTP servers do not, so Pulse deletes contents first).

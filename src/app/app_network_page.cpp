@@ -16,6 +16,8 @@
 #include "../common/localization.h"
 #include "../common/utf8_file.h"
 #include "../fs/fs_enum.h"
+#include "../fs/ftp_url.h"
+#include "ftp_registry.h"
 #include "../ui/confirm_dialog.h"
 #include "../ui/connect_server_dialog.h"
 #include "../ui/fluent_menu.h"
@@ -480,6 +482,13 @@ bool HandleNetworkPageCommand(AppState& s, int cmd) {
 }
 
 bool OpenServerAddressText(AppState& s, const std::wstring& text) {
+    // ftp:// goes to the built-in client: not a UNC path, so Win32 cannot open it.
+    fs::FtpUrl ftp;
+    if (fs::ParseFtpUrl(text, ftp)) {
+        FtpRegistry::Instance().Remember(ftp);
+        NavigateTo(s, fs::FtpCanonicalText(ftp));
+        return true;
+    }
     const bool connect = s.addressConnectMode;
     const bool url = app::IsServerUrlText(text) || text.find(L"://") != std::wstring::npos;
     if (!connect && !app::IsServerUrlText(text)) return false;

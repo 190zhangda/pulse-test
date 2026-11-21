@@ -590,7 +590,7 @@ FtpStatus FtpClient::Abort() {
 }
 
 FtpStatus FtpClient::List(const std::wstring& path, std::vector<FtpItem>& out,
-                          const std::atomic_bool* cancelled, std::wstring* detail) {
+                          const FtpCancel& cancelled, std::wstring* detail) {
     out.clear();
     if (control_ == INVALID_SOCKET) {
         SetDetail(detail, L"not connected");
@@ -633,7 +633,7 @@ FtpStatus FtpClient::List(const std::wstring& path, std::vector<FtpItem>& out,
 
         bool aborted = false;
         for (;;) {
-            if (cancelled && cancelled->load()) {
+            if (cancelled && cancelled()) {
                 aborted = true;
                 break;
             }
@@ -718,7 +718,7 @@ FtpStatus FtpClient::Stat(const std::wstring& path, uint64_t* size, FILETIME* mt
 }
 
 FtpStatus FtpClient::Download(const std::wstring& remote, const std::wstring& local,
-                              const std::atomic_bool* cancelled, const FtpProgress& progress,
+                              const FtpCancel& cancelled, const FtpProgress& progress,
                               std::wstring* detail) {
     HANDLE file = CreateFileW(local.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                               FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -750,7 +750,7 @@ FtpStatus FtpClient::Download(const std::wstring& remote, const std::wstring& lo
     uint64_t written = 0;
     bool failed = false;
     for (;;) {
-        if (cancelled && cancelled->load()) break;
+        if (cancelled && cancelled()) break;
         char chunk[kChunk];
         const int read = RecvSome(data, chunk, kChunk);
         if (read > 0) {
@@ -791,7 +791,7 @@ FtpStatus FtpClient::Download(const std::wstring& remote, const std::wstring& lo
 }
 
 FtpStatus FtpClient::Upload(const std::wstring& local, const std::wstring& remote,
-                            const std::atomic_bool* cancelled, const FtpProgress& progress,
+                            const FtpCancel& cancelled, const FtpProgress& progress,
                             std::wstring* detail) {
     HANDLE file = CreateFileW(local.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                               FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -821,7 +821,7 @@ FtpStatus FtpClient::Upload(const std::wstring& local, const std::wstring& remot
     uint64_t sent = 0;
     bool failed = false;
     for (;;) {
-        if (cancelled && cancelled->load()) break;
+        if (cancelled && cancelled()) break;
         char chunk[kChunk];
         DWORD read = 0;
         if (!ReadFile(file, chunk, kChunk, &read, nullptr)) {

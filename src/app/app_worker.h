@@ -65,6 +65,7 @@ struct WorkResult {
     bool error = false;
     bool bitlocker_locked = false; // error: the drive is a locked BitLocker volume
     uint8_t device_error = 0;      // error: fs::DeviceError of a pulse:device: listing
+    uint8_t ftp_error = 0;         // error: app::FtpError of an ftp:// listing
     double enum_ms = 0.0;
     double sort_ms = 0.0;
     uint64_t listed_at = 0;  // fs::WatchClock when a folder listing began

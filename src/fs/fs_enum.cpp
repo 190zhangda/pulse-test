@@ -8,6 +8,7 @@
 #include <chrono>
 // fs_enum.cpp
 #include "fs_enum.h"
+#include "ftp_url.h"
 #include "drive_label.h"
 #include "bitlocker_volume.h"
 #include "bounded_enumeration.h"
@@ -129,12 +130,9 @@ static void InitNtApi() {
 }
 
 bool IsVirtualPath(const std::wstring& path) {
-    return path.starts_with(L"pulse:");
-}
-
-bool IsUncPath(const std::wstring& path) {
-    return path.starts_with(L"\\\\?\\UNC\\") ||
-           (path.starts_with(L"\\\\") && !path.starts_with(L"\\\\?\\"));
+    // ftp:// folders live outside Win32: the browser lists them through
+    // FtpRegistry, so nothing here may hand them to FindFirstFileW.
+    return path.starts_with(L"pulse:") || IsFtpUrl(path);
 }
 
 std::wstring NormalizePath(std::wstring path) {
