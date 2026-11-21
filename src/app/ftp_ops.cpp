@@ -109,7 +109,8 @@ void DownloadTree(FtpOpResult& result, const std::wstring& remote, const std::ws
     }
 }
 
-void DeleteOne(FtpOpResult& result, const std::wstring& remote, bool directory) {    FtpRegistry& registry = FtpRegistry::Instance();
+void DeleteOne(FtpOpResult& result, const std::wstring& remote, bool directory) {
+    FtpRegistry& registry = FtpRegistry::Instance();
     const FtpError error = directory
         ? registry.RemoveTree(remote, [] { return Cancelled(); })
         : registry.RemoveFile(remote, [] { return Cancelled(); });

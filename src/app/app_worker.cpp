@@ -301,13 +301,13 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
         }
     } else if (fs::IsFtpUrl(item.path)) {
         // An ftp:// folder: listed over the control connection on this thread.
-        const app::FtpError error = app::FtpRegistry::Instance().ListFolder(
+        const FtpError error = FtpRegistry::Instance().ListFolder(
             item.path, *entries, [&] { return cancelled(); });
-        if (error == app::FtpError::Cancelled) {
+        if (error == FtpError::Cancelled) {
             res.cancelled = true;
             return res;
         }
-        if (error != app::FtpError::None) {
+        if (error != FtpError::None) {
             res.cancelled = cancelled();
             res.error = !res.cancelled;
             res.ftp_error = static_cast<uint8_t>(error);
