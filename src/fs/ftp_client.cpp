@@ -497,22 +497,23 @@ FtpStatus FtpClient::OpenData(FtpHandle* data, std::wstring* detail) {
         const FtpStatus status = Command("EPSV", &reply, detail);
         if (status != FtpStatus::Ok) return status;
         if (reply.code == 229) {
-            // 229 Entering Extended Passive Mode (|||6446|)
             const size_t open = reply.text.find('(');
             const size_t close = reply.text.rfind(')');
             if (open == std::string::npos || close == std::string::npos || close <= open)
                 return FtpStatus::Protocol;
+            // 229 Entering Extended Passive Mode (|||6446|): the port sits
+            // between the third and fourth pipe.
             const std::string inside = reply.text.substr(open + 1, close - open - 1);
-            size_t first = std::string::npos;
-            size_t last = std::string::npos;
-            for (size_t i = 0; i < inside.size(); ++i) {
-                if (inside[i] != '|') continue;
-                if (first == std::string::npos) first = i;
-                else last = i;
+            std::vector<std::string> fields;
+            size_t begin = 0;
+            for (size_t i = 0; i <= inside.size(); ++i) {
+                if (i != inside.size() && inside[i] != '|') continue;
+                fields.emplace_back(inside.substr(begin, i - begin));
+                begin = i + 1;
             }
-            if (first == std::string::npos || last == std::string::npos || last <= first + 1)
-                return FtpStatus::Protocol;
-            port = static_cast<uint16_t>(atoi(inside.substr(first + 1, last - first - 1).c_str()));
+            if (fields.size() < 5) return FtpStatus::Protocol;
+            port = static_cast<uint16_t>(atoi(fields[3].c_str()));
+            if (port == 0) return FtpStatus::Protocol;
         } else {
             epsv_ = false;  // the server does not know EPSV
         }
