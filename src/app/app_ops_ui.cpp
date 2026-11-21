@@ -369,6 +369,22 @@ void PasteIntoCurrent(AppState& s) {
             {"items", static_cast<uint64_t>(files.paths.size())}});
         return;
     }
+    if (tab && !tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path) &&
+        !app::IsUncServerRoot(tab->current_path)) {
+        // A server's rows were copied: paste here downloads them.
+        std::vector<std::wstring> remote = app::FtpOps::Instance().Copied();
+        if (!remote.empty()) {
+            app::FtpOpRequest request;
+            request.kind = app::FtpOpKind::Download;
+            request.folder = tab->current_path;
+            request.sources = std::move(remote);
+            const size_t count = request.sources.size();
+            const bool submitted = app::FtpOps::Instance().Submit(std::move(request), s.hwnd);
+            pulse::diagnostics::runtime::Event("ftp_download_paste", {{"submitted", submitted ? 1ull : 0ull},
+                {"items", static_cast<uint64_t>(count)}});
+            return;
+        }
+    }
     if (IsDeviceTab(tab)) {
         // A phone folder: files or another phone's items go in as a Pulse
         // task (Explorer's engine, Pulse's progress and conflict dialog).
@@ -883,6 +899,26 @@ void CollectToTray(AppState& s, bool move_intent) {
     // A drive or a share is not copied as a whole by Ctrl+C / Ctrl+X.
     const app::SelectionCaps caps = SelectionCapsOf(s);
     if (!(move_intent ? caps.cut : caps.copy)) return;
+    if (caps.kind == app::SelectionKind::Ftp) {
+        // Remote rows: Pulse keeps their URLs, since the clipboard is about
+        // paths that exist. A paste into a local folder downloads them.
+        std::vector<std::wstring> urls;
+        for (int index : tab->SelectedIndices()) {
+            if (index < 0 || index >= static_cast<int>(tab->EntryCount())) continue;
+            const std::wstring& full = tab->EntryAt(static_cast<size_t>(index)).full_path;
+            if (!full.empty()) urls.push_back(full);
+        }
+        if (urls.empty()) return;
+        const size_t count = urls.size();
+        app::FtpOps::Instance().SetCopied(std::move(urls));
+        s.cutPaths.clear();
+        s.trayClipboardBatchId = 0;
+        s.trayClipboardSequence = 0;
+        s.trayClip = {};
+        pulse::diagnostics::runtime::Event("ftp_copy", {{"items", static_cast<uint64_t>(count)}});
+        if (s.hwnd) InvalidateRect(s.hwnd, nullptr, FALSE);
+        return;
+    }
     if (caps.kind == app::SelectionKind::Device) {
         // Phone items: the shell's own data object for them, owned by Pulse
         // (it outlives the shell host), so Pulse, Explorer and the desktop

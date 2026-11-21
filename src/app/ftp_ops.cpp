@@ -33,6 +33,12 @@ bool IsDirectory(const std::wstring& path) {
     return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
+std::wstring JoinLocal(const std::wstring& dir, const std::wstring& name) {
+    if (dir.empty()) return name;
+    if (dir.back() == L'\\') return dir + name;
+    return dir + L'\\' + name;
+}
+
 void NoteFailure(FtpOpResult& result, FtpError error) {
     ++result.failed;
     if (result.error == 0) result.error = static_cast<uint8_t>(error);
@@ -77,8 +83,33 @@ void UploadTree(FtpOpResult& result, const std::wstring& local, const std::wstri
     FindClose(find);
 }
 
-void DeleteOne(FtpOpResult& result, const std::wstring& remote, bool directory) {
-    FtpRegistry& registry = FtpRegistry::Instance();
+void DownloadFile(FtpOpResult& result, const std::wstring& remote, const std::wstring& local) {
+    const FtpError error = FtpRegistry::Instance().Download(remote, local, [] { return Cancelled(); });
+    if (error == FtpError::None) ++result.done;
+    else NoteFailure(result, error);
+}
+
+// A remote file lands as itself; a remote folder is created locally first and
+// its contents follow. A path the server will not list is tried as a file.
+void DownloadTree(FtpOpResult& result, const std::wstring& remote, const std::wstring& local) {
+    if (Cancelled()) return;
+    std::vector<fs::DirEntry> rows;
+    const FtpError listed =
+        FtpRegistry::Instance().ListFolder(remote, rows, [] { return Cancelled(); });
+    if (listed != FtpError::None) {
+        DownloadFile(result, remote, local);
+        return;
+    }
+    CreateDirectoryW(local.c_str(), nullptr);
+    for (const fs::DirEntry& row : rows) {
+        if (Cancelled()) break;
+        const std::wstring child = JoinLocal(local, row.name);
+        if (row.is_dir) DownloadTree(result, row.full_path, child);
+        else DownloadFile(result, row.full_path, child);
+    }
+}
+
+void DeleteOne(FtpOpResult& result, const std::wstring& remote, bool directory) {    FtpRegistry& registry = FtpRegistry::Instance();
     const FtpError error = directory
         ? registry.RemoveTree(remote, [] { return Cancelled(); })
         : registry.RemoveFile(remote, [] { return Cancelled(); });
@@ -100,6 +131,17 @@ FtpOpResult RunRequest(const FtpOpRequest& request) {
                 continue;
             }
             UploadTree(result, local, remote);
+        }
+        break;
+    case FtpOpKind::Download:
+        for (const std::wstring& remote : request.sources) {
+            if (Cancelled()) break;
+            const std::wstring leaf = fs::FtpLeafName(remote);
+            if (leaf.empty()) {
+                ++result.failed;
+                continue;
+            }
+            DownloadTree(result, remote, JoinLocal(request.folder, leaf));
         }
         break;
     case FtpOpKind::Delete:
@@ -172,6 +214,21 @@ void FtpOps::Shutdown() {
     stopping.store(true);
     std::lock_guard lock(worker_mutex);
     if (worker.joinable()) worker.join();
+}
+
+void FtpOps::SetCopied(std::vector<std::wstring> urls) {
+    std::lock_guard lock(copied_mutex_);
+    copied_ = std::move(urls);
+}
+
+std::vector<std::wstring> FtpOps::Copied() const {
+    std::lock_guard lock(copied_mutex_);
+    return copied_;
+}
+
+void FtpOps::ClearCopied() {
+    std::lock_guard lock(copied_mutex_);
+    copied_.clear();
 }
 
 }  // namespace pulse::app

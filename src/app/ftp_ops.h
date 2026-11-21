@@ -8,6 +8,7 @@
 #include <windows.h>
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,7 @@ namespace pulse::app {
 
 enum class FtpOpKind : uint8_t {
     Upload,        // sources = local paths (files or folders), folder = the ftp folder
+    Download,      // sources = remote URLs, folder = the local folder to fill
     Delete,        // sources = remote URLs
     Rename,        // sources[0] = remote URL, new_name = the new leaf name
     MakeDirectory  // folder + new_name: the folder to create
@@ -49,8 +51,18 @@ public:
     // Waits for the running request (the app is going away).
     void Shutdown();
 
+    // Ctrl+C on a server's rows: the URLs a later paste into a local folder
+    // fetches. Pulse keeps them here because the Windows clipboard is about
+    // paths that exist, and these do not.
+    void SetCopied(std::vector<std::wstring> urls);
+    std::vector<std::wstring> Copied() const;
+    void ClearCopied();
+
 private:
     FtpOps() = default;
+
+    mutable std::mutex copied_mutex_;
+    std::vector<std::wstring> copied_;
 };
 
 }  // namespace pulse::app

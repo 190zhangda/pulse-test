@@ -90,10 +90,11 @@ inline SelectionCaps ComputeSelectionCaps(const Tab& tab, const PlacesCatalog* p
         return caps;
     }
     if (fs::IsFtpUrl(tab.current_path)) {
-        // Remote rows: the write commands run through FtpOps. They carry no
-        // Win32 path and no shell id, so copy out of a server (a download) is
-        // a separate route and comes later.
+        // Remote rows: the write commands run through FtpOps. Copy stages the
+        // URLs so a paste into a local folder downloads them; a cut would have
+        // to delete first, so it stays out for now.
         caps.kind = SelectionKind::Ftp;
+        caps.copy = true;
         caps.del = true;
         caps.rename = count == 1;
         return caps;
