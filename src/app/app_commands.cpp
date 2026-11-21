@@ -209,6 +209,23 @@ static void CreateDeviceFolder(AppState& s, app::Tab& tab) {
     app::QueueCreateRenameIntent(tab.create_rename_intents, task_id, tab.current_path, tab.view_generation);
 }
 
+// A name the remote folder rows do not use yet: the new-folder name, then " (2)", ...
+static std::wstring UniqueRemoteName(const app::Tab& tab, const std::wstring& stem) {
+    std::wstring name = stem;
+    for (int attempt = 2; attempt < 1000; ++attempt) {
+        bool taken = false;
+        for (size_t index = 0; index < tab.EntryCount(); ++index) {
+            if (_wcsicmp(tab.EntryAt(index).name.c_str(), name.c_str()) == 0) {
+                taken = true;
+                break;
+            }
+        }
+        if (!taken) return name;
+        name = stem + L" (" + std::to_wstring(attempt) + L")";
+    }
+    return name;
+}
+
 void CreateNewItem(AppState& s, bool folder) {
     app::Tab* tab = ActiveTab(s);
     if (folder && IsDeviceTab(tab)) {
@@ -256,22 +273,6 @@ bool CanCreateHere(const app::Tab* tab) {
         !app::IsUncServerRoot(tab->current_path);  // \\server lists shares, not files
 }
 
-// A name the remote folder's rows do not use yet: "新建文件夹", then " (2)", ...
-std::wstring UniqueRemoteName(const app::Tab& tab, const std::wstring& stem) {
-    std::wstring name = stem;
-    for (int attempt = 2; attempt < 1000; ++attempt) {
-        bool taken = false;
-        for (size_t index = 0; index < tab.EntryCount(); ++index) {
-            if (_wcsicmp(tab.EntryAt(index).name.c_str(), name.c_str()) == 0) {
-                taken = true;
-                break;
-            }
-        }
-        if (!taken) return name;
-        name = stem + L" (" + std::to_wstring(attempt) + L")";
-    }
-    return name;
-}
 
 // Paste also reaches a phone folder (the shell host drops the clipboard on it).
 bool CanPasteHere(const app::Tab* tab) {
