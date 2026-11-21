@@ -442,7 +442,7 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
 
     // Read link destinations on this worker before display (including .lnk targets).
     // Not on a phone: reading a .lnk there means copying it off the device.
-    if (!fs::IsRecycleViewPath(item.path) && !fs::IsDevicePath(item.path)) {
+    if (!fs::IsRecycleViewPath(item.path) && !fs::IsDevicePath(item.path) && !fs::IsFtpUrl(item.path)) {
         ResolveLinksInPlace(item.path, *entries, [&] {
             std::lock_guard<std::mutex> lock(mutex_);
             const auto it = current_gen_.find(item.request_key);
