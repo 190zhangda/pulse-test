@@ -236,7 +236,16 @@ void OpenDuplicateLocation(AppState& s, size_t group, size_t file) {
     if (group >= s.duplicateScan.groups.size()) return;
     const auto& files = s.duplicateScan.groups[group].files;
     if (file >= files.size()) return;
-    const std::wstring parent = fs::ParentPath(files[file].path);
+    const std::wstring& path = files[file].path;
+    // A server path has no Windows separators: ask the ftp helpers for its
+    // folder, then browse there like any other remote folder.
+    fs::FtpUrl remote;
+    if (fs::ParseFtpUrl(path, remote)) {
+        remote.path = fs::FtpParentPath(remote.path);
+        NavigateTo(s, fs::FtpCanonicalText(remote));
+        return;
+    }
+    const std::wstring parent = fs::ParentPath(path);
     if (!parent.empty()) NavigateTo(s, parent);
 }
 
