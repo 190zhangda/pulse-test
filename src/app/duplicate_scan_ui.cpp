@@ -58,6 +58,17 @@ DWORD ScanErrorFor(uint8_t error) {
     return ERROR_NOT_SUPPORTED;
 }
 
+// Scan requests normally wait for the content pack; an isolated test run owns
+// the pack check itself (content_pack_ui declines there), so the probe env var
+// lets the scan proceed against the bundled pack.
+bool ContentPackReady(AppState& s) {
+    if (s.isolatedTest) {
+        wchar_t probe[8]{};
+        if (GetEnvironmentVariableW(L"PULSE_TEST_DUP_SCAN", probe, ARRAYSIZE(probe))) return true;
+    }
+    return OfferContentPack(s);
+}
+
 // Hands `roots` to the duplicate finder in Pulse.Content.exe.
 void RunDuplicateSearch(AppState& s, const std::vector<std::wstring>& roots) {
     auto& session = s.duplicateScan;
@@ -145,7 +156,7 @@ void StartDuplicateScan(AppState& s) {
     if (fs::IsFtpUrl(session.folder_path)) {
         fs::FtpUrl remote;
         if (!fs::ParseFtpUrl(session.folder_path, remote)) return;
-        if (!OfferContentPack(s)) return;
+        if (!ContentPackReady(s)) return;
         // Keep the signed-in text in the session only; the folder path that is
         // shown and saved drops the password.
         const std::wstring canonical = fs::FtpCanonicalText(remote);
@@ -182,7 +193,7 @@ void StartDuplicateScan(AppState& s) {
         session.scope, session.folder_path, session.drive_root, volumes);
     if (roots.empty()) return;
     // Duplicate finding runs in Pulse.Content.exe (content enhancement pack).
-    if (!OfferContentPack(s)) return;
+    if (!ContentPackReady(s)) return;
     PersistDuplicateScanPrefs(s);
     session.ClearFtpMapping();
     RunDuplicateSearch(s, roots);
