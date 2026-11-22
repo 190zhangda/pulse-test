@@ -5579,6 +5579,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
                 state.duplicateScan.folder_path = duplicate_probe.data();
                 state.duplicateScan.minimum_file_bytes =
                     app::DuplicateScanSession::DefaultMinimumBytes(state.duplicateScan.scope);
+                // Isolated runs keep the search services down, so the duplicate
+                // client has to be started here or SearchAsync drops the request.
+                state.duplicateSearch.Start(ServiceWindow(state), WM_DUPLICATE_SCAN, false);
                 diagnostics::runtime::Event("dup_scan_hook",
                                             {{"ftp", fs::IsFtpUrl(state.duplicateScan.folder_path) ? 1ull : 0ull}});
                 StartDuplicateScan(state);
