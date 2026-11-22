@@ -597,7 +597,9 @@ FtpStatus FtpClient::List(const std::wstring& path, std::vector<FtpItem>& out,
         SetDetail(detail, L"not connected");
         return FtpStatus::Network;
     }
-    const std::string encoded = FtpUtf8(FtpPercentEncode(path));
+    // The wire carries the pathname itself, UTF-8 (RFC 2640). The
+    // percent-encoding only exists in the address bar's text.
+    const std::string encoded = FtpUtf8(path);
     const std::string verb = mlsd_ ? "MLSD" : "LIST";
     std::string listing;
     FtpStatus status = FtpStatus::Protocol;
@@ -700,7 +702,7 @@ FtpStatus FtpClient::Stat(const std::wstring& path, uint64_t* size, FILETIME* mt
     if (mtime) *mtime = FILETIME{};
     if (has_mtime) *has_mtime = false;
     Reply reply;
-    const std::string encoded = FtpUtf8(FtpPercentEncode(path));
+    const std::string encoded = FtpUtf8(path);
     if (Command("SIZE " + encoded, &reply, detail) == FtpStatus::Ok && reply.code == 213) {
         const size_t space = reply.text.find(' ');
         if (size) *size = strtoull(reply.text.c_str() + (space == std::string::npos ? 0 : space + 1), nullptr, 10);
@@ -745,7 +747,7 @@ FtpStatus FtpClient::Download(const std::wstring& remote, const std::wstring& lo
         DeleteFileW(local.c_str());
         return status;
     }
-    const std::string encoded = FtpUtf8(FtpPercentEncode(remote));
+    const std::string encoded = FtpUtf8(remote);
     Reply reply;
     status = Command("RETR " + encoded, &reply, detail);
     if (status != FtpStatus::Ok || (reply.code != 150 && reply.code != 125 && reply.code != 226)) {
@@ -825,7 +827,7 @@ FtpStatus FtpClient::Upload(const std::wstring& local, const std::wstring& remot
         CloseHandle(file);
         return status;
     }
-    const std::string encoded = FtpUtf8(FtpPercentEncode(remote));
+    const std::string encoded = FtpUtf8(remote);
     Reply reply;
     status = Command("STOR " + encoded, &reply, detail);
     if (status != FtpStatus::Ok || (reply.code != 150 && reply.code != 125)) {
@@ -869,7 +871,7 @@ FtpStatus FtpClient::Upload(const std::wstring& local, const std::wstring& remot
 
 FtpStatus FtpClient::Remove(const std::wstring& path, std::wstring* detail) {
     Reply reply;
-    const std::string encoded = FtpUtf8(FtpPercentEncode(path));
+    const std::string encoded = FtpUtf8(path);
     const FtpStatus status = Command("DELE " + encoded, &reply, detail);
     if (status != FtpStatus::Ok) return status;
     if (reply.code == 250 || reply.code == 200) return FtpStatus::Ok;
@@ -880,7 +882,7 @@ FtpStatus FtpClient::Remove(const std::wstring& path, std::wstring* detail) {
 
 FtpStatus FtpClient::RemoveDirectory(const std::wstring& path, std::wstring* detail) {
     Reply reply;
-    const std::string encoded = FtpUtf8(FtpPercentEncode(path));
+    const std::string encoded = FtpUtf8(path);
     const FtpStatus status = Command("RMD " + encoded, &reply, detail);
     if (status != FtpStatus::Ok) return status;
     if (reply.code == 250 || reply.code == 200) return FtpStatus::Ok;
@@ -891,7 +893,7 @@ FtpStatus FtpClient::RemoveDirectory(const std::wstring& path, std::wstring* det
 
 FtpStatus FtpClient::MakeDirectory(const std::wstring& path, std::wstring* detail) {
     Reply reply;
-    const std::string encoded = FtpUtf8(FtpPercentEncode(path));
+    const std::string encoded = FtpUtf8(path);
     const FtpStatus status = Command("MKD " + encoded, &reply, detail);
     if (status != FtpStatus::Ok) return status;
     if (reply.code == 257 || reply.code == 250) return FtpStatus::Ok;
@@ -901,14 +903,14 @@ FtpStatus FtpClient::MakeDirectory(const std::wstring& path, std::wstring* detai
 
 FtpStatus FtpClient::Rename(const std::wstring& from, const std::wstring& to, std::wstring* detail) {
     Reply reply;
-    FtpStatus status = Command("RNFR " + FtpUtf8(FtpPercentEncode(from)), &reply, detail);
+    FtpStatus status = Command("RNFR " + FtpUtf8(from), &reply, detail);
     if (status != FtpStatus::Ok) return status;
     if (reply.code != 350 && reply.code != 250) {
         if (reply.code == 550) return FtpStatus::NotFound;
         SetDetail(detail, reply.text);
         return FtpStatus::Denied;
     }
-    status = Command("RNTO " + FtpUtf8(FtpPercentEncode(to)), &reply, detail);
+    status = Command("RNTO " + FtpUtf8(to), &reply, detail);
     if (status != FtpStatus::Ok) return status;
     if (reply.code == 250 || reply.code == 200) return FtpStatus::Ok;
     SetDetail(detail, reply.text);
