@@ -1,12 +1,94 @@
 #include "duplicate_scan.h"
 #include "app_internal.h"
 #include "../fs/fs_enum.h"
+#include "../fs/ftp_url.h"
 #include "../common/localization.h"
+#include "app_messages.h"
 #include "content_pack_ui.h"
+#include "ftp_ops.h"
+#include "ftp_registry.h"
+#include "session.h"
 
+#include <cstdio>
 #include <thread>
 
 namespace pulse {
+namespace {
+
+// FNV-1a over the URL, sixteen hex digits: one cache folder per remote tree.
+std::wstring FtpScanCacheKey(const std::wstring& url) {
+    uint64_t hash = 1469598103934665603ull;
+    for (wchar_t c : url) {
+        hash ^= static_cast<uint64_t>(c);
+        hash *= 1099511628211ull;
+    }
+    wchar_t text[17]{};
+    _snwprintf_s(text, _TRUNCATE, L"%016llx", static_cast<unsigned long long>(hash));
+    return text;
+}
+
+void EnsureFolders(const std::wstring& path) {
+    std::wstring sofar;
+    for (wchar_t c : path) {
+        sofar.push_back(c);
+        if (c == L'\\' || c == L'/') CreateDirectoryW(sofar.c_str(), nullptr);
+    }
+    CreateDirectoryW(sofar.c_str(), nullptr);
+}
+
+// The local folder that mirrors `url` for the duplicate scanner.
+std::wstring FtpScanLocalRoot(const std::wstring& url) {
+    std::wstring root = app::GetPulseDataDir() + L"\\Cache\\Ftp\\Scan\\" + FtpScanCacheKey(url);
+    EnsureFolders(root);
+    return root;
+}
+
+// The Win32 code the duplicate-scan view shows for a failed mirror download.
+DWORD ScanErrorFor(uint8_t error) {
+    switch (static_cast<app::FtpError>(error)) {
+    case app::FtpError::None: return ERROR_SUCCESS;
+    case app::FtpError::BadUrl: return ERROR_INVALID_NAME;
+    case app::FtpError::Auth: return ERROR_ACCESS_DENIED;
+    case app::FtpError::NotFound: return ERROR_PATH_NOT_FOUND;
+    case app::FtpError::Timeout: return ERROR_TIMEOUT;
+    case app::FtpError::Network: return ERROR_NETWORK_UNREACHABLE;
+    case app::FtpError::Denied: return ERROR_ACCESS_DENIED;
+    case app::FtpError::Cancelled: return ERROR_CANCELLED;
+    }
+    return ERROR_NOT_SUPPORTED;
+}
+
+// Hands `roots` to the duplicate finder in Pulse.Content.exe.
+void RunDuplicateSearch(AppState& s, const std::vector<std::wstring>& roots) {
+    auto& session = s.duplicateScan;
+    session.ResetResults();
+    session.generation += 1;
+    session.scanning = true;
+    index::ContentSearchRequest request;
+    request.generation = session.generation;
+    request.mode = index::ContentSearchMode::Duplicates;
+    request.maximum_hits = 10000;
+    request.roots = roots;
+    request.root = roots.front();
+    request.recursive = true;
+    request.skip_system_locations = session.scope != app::DuplicateScanScope::Folder;
+    request.minimum_file_bytes = session.minimum_file_bytes;
+    s.duplicateSearch.SearchAsync(std::move(request));
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
+// Deletes the extra copies of one group (or all of them) on the server.
+void DeleteFtpExtras(AppState& s, std::vector<std::wstring> targets) {
+    if (targets.empty()) return;
+    app::FtpOpRequest request;
+    request.kind = app::FtpOpKind::Delete;
+    request.folder = s.duplicateScan.ftp_source_root;
+    request.sources = std::move(targets);
+    request.dirs.assign(request.sources.size(), 0);  // duplicates are files
+    app::FtpOps::Instance().Submit(std::move(request), s.hwnd);
+}
+
+}  // namespace
 
 void PersistDuplicateScanPrefs(AppState& s) {
     s.appPrefs.duplicate_scan_scope = static_cast<int>(s.duplicateScan.scope);
@@ -57,26 +139,67 @@ void StartDuplicateScan(AppState& s) {
             break;
         }
     }
+    // An ftp:// folder has no local files to walk: mirror it first, then scan
+    // the copy. The password stays in this session (the picked text), while
+    // the folder path shown and saved carries only the user name.
+    if (fs::IsFtpUrl(session.folder_path)) {
+        fs::FtpUrl remote;
+        if (!fs::ParseFtpUrl(session.folder_path, remote)) return;
+        if (!OfferContentPack(s)) return;
+        // Keep the signed-in text in the session only; the folder path that is
+        // shown and saved drops the password.
+        const std::wstring canonical = fs::FtpCanonicalText(remote);
+        std::wstring credentials = session.folder_path;
+        // Scanning again starts from the saved path, which has no password:
+        // fall back to the text this session signed in with for that folder.
+        if (remote.password.empty() && !session.ftp_credentials.empty()) {
+            fs::FtpUrl previous;
+            if (fs::ParseFtpUrl(session.ftp_credentials, previous) &&
+                !previous.password.empty() &&
+                _wcsicmp(fs::FtpCanonicalText(previous).c_str(), canonical.c_str()) == 0)
+                credentials = session.ftp_credentials;
+        }
+        const std::wstring local_root = FtpScanLocalRoot(credentials);
+        session.ResetResults();
+        session.generation += 1;
+        session.scope = app::DuplicateScanScope::Folder;
+        session.folder_path = canonical;
+        session.SetFtpMapping(canonical, credentials, local_root);
+        PersistDuplicateScanPrefs(s);
+        session.scanning = true;
+        session.phase = index::ContentSearchPhase::Enumerating;
+        session.current_root = canonical;
+        if (!app::FtpOps::Instance().DownloadForScan(credentials, local_root, s.hwnd,
+                                                    session.generation)) {
+            session.scanning = false;
+            session.completed = true;
+            session.error = ERROR_NOT_SUPPORTED;
+        }
+        InvalidateRect(s.hwnd, nullptr, FALSE);
+        return;
+    }
     auto roots = app::DuplicateScanSession::ResolveRoots(
         session.scope, session.folder_path, session.drive_root, volumes);
     if (roots.empty()) return;
     // Duplicate finding runs in Pulse.Content.exe (content enhancement pack).
     if (!OfferContentPack(s)) return;
     PersistDuplicateScanPrefs(s);
-    session.ResetResults();
-    session.generation += 1;
-    session.scanning = true;
-    index::ContentSearchRequest request;
-    request.generation = session.generation;
-    request.mode = index::ContentSearchMode::Duplicates;
-    request.maximum_hits = 10000;
-    request.roots = roots;
-    request.root = roots.front();
-    request.recursive = true;
-    request.skip_system_locations = session.scope != app::DuplicateScanScope::Folder;
-    request.minimum_file_bytes = session.minimum_file_bytes;
-    s.duplicateSearch.SearchAsync(std::move(request));
-    InvalidateRect(s.hwnd, nullptr, FALSE);
+    session.ClearFtpMapping();
+    RunDuplicateSearch(s, roots);
+}
+
+void ApplyFtpScanDownload(AppState& s, const app::FtpScanDownloadResult& result) {
+    auto& session = s.duplicateScan;
+    // A newer scan (or a cancelled one) replaced this download.
+    if (result.generation != session.generation || !session.IsFtpScan()) return;
+    if (result.error != 0) {
+        session.scanning = false;
+        session.completed = true;
+        session.error = ScanErrorFor(result.error);
+        InvalidateRect(s.hwnd, nullptr, FALSE);
+        return;
+    }
+    RunDuplicateSearch(s, {result.local_root});
 }
 
 void CancelDuplicateScan(AppState& s) {
@@ -86,12 +209,21 @@ void CancelDuplicateScan(AppState& s) {
 }
 
 void RecycleDuplicateGroup(AppState& s, size_t group) {
+    if (s.duplicateScan.IsFtpScan()) {
+        // Nothing on the server can go to the recycle bin: FtpOps deletes it.
+        DeleteFtpExtras(s, s.duplicateScan.FtpFilesToDelete(group));
+        return;
+    }
     ops::OpRequest req;
     if (!s.duplicateScan.BuildCleanupRequest(req, group)) return;
     s.ops.Submit(std::move(req));
 }
 
 void RecycleAllDuplicateExtras(AppState& s) {
+    if (s.duplicateScan.IsFtpScan()) {
+        DeleteFtpExtras(s, s.duplicateScan.AllFtpFilesToDelete());
+        return;
+    }
     ops::OpRequest req;
     if (!s.duplicateScan.BuildCleanupRequest(req)) return;
     s.ops.Submit(std::move(req));

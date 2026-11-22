@@ -1,6 +1,7 @@
 #include "duplicate_scan.h"
 #include "../ops/ops_manager.h"
 #include "../common/path_utils.h"
+#include "../fs/ftp_url.h"
 
 #include <algorithm>
 #include <unordered_map>
@@ -113,6 +114,41 @@ void DuplicateScanSession::ResetResults() {
     speed_bytes_ = 0;
 }
 
+void DuplicateScanSession::SetFtpMapping(std::wstring source_root,
+                                         std::wstring credentials,
+                                         std::wstring local_root) {
+    ftp_source_root = std::move(source_root);
+    ftp_credentials = std::move(credentials);
+    ftp_local_root = std::move(local_root);
+}
+
+void DuplicateScanSession::ClearFtpMapping() {
+    ftp_source_root.clear();
+    ftp_credentials.clear();
+    ftp_local_root.clear();
+}
+
+std::wstring DuplicateScanSession::MapLocalToFtp(const std::wstring& path) const {
+    if (!IsFtpScan() || path.empty()) return path;
+    // The local mirror is rooted at ftp_local_root; a hit below it maps to the
+    // same subtree on the server. Compare case-insensitively (Windows paths)
+    // and keep the original ftp_source_root (which carries the user, and may
+    // be typed with any letter case).
+    if (path.size() <= ftp_local_root.size()) return path;
+    if (CompareStringOrdinal(path.c_str(), static_cast<int>(ftp_local_root.size()),
+                             ftp_local_root.c_str(), static_cast<int>(ftp_local_root.size()),
+                             TRUE) != CSTR_EQUAL)
+        return path;
+    const wchar_t separator = path[ftp_local_root.size()];
+    if (separator != L'\\' && separator != L'/') return path;
+    std::wstring relative = path.substr(ftp_local_root.size() + 1);
+    std::replace(relative.begin(), relative.end(), L'\\', L'/');
+    fs::FtpUrl base;
+    if (!fs::ParseFtpUrl(ftp_source_root, base)) return path;
+    base.path = fs::FtpJoinPath(base.path, relative);
+    return fs::FtpCanonicalText(base);
+}
+
 void DuplicateScanSession::UpdateSpeed(const index::ContentSearchProgress& progress) {
     const auto now = std::chrono::steady_clock::now();
     if (speed_tick_.time_since_epoch().count() == 0 || phase != progress.phase) {
@@ -159,7 +195,9 @@ void DuplicateScanSession::AppendHits(const std::vector<index::ContentHit>& hits
     bool changed = false;
     for (const auto& hit : hits) {
         if (hit.group == 0 || invalidated_groups_.contains(hit.group)) continue;
-        DuplicateFile file{hit.path, hit.name.empty() ? hit.path : hit.name,
+        std::wstring display_path = MapLocalToFtp(hit.path);
+        std::wstring display_name = hit.name.empty() ? display_path : hit.name;
+        DuplicateFile file{std::move(display_path), std::move(display_name),
                            hit.size, hit.modified};
         const auto visible = group_indices_.find(hit.group);
         if (visible == group_indices_.end()) {
@@ -254,6 +292,17 @@ std::vector<std::wstring> DuplicateScanSession::AllFilesToDelete() const {
         paths.insert(paths.end(), extra.begin(), extra.end());
     }
     return paths;
+}
+
+// In an FTP scan the file paths in `groups` were mapped back to ftp:// URLs in
+// AppendHits, so the extras are already what FtpOps Delete expects (canonical
+// URLs, no password). These wrappers keep the deletion branch readable.
+std::vector<std::wstring> DuplicateScanSession::FtpFilesToDelete(size_t group) const {
+    return FilesToDelete(group);
+}
+
+std::vector<std::wstring> DuplicateScanSession::AllFtpFilesToDelete() const {
+    return AllFilesToDelete();
 }
 
 bool DuplicateScanSession::BuildCleanupRequest(ops::OpRequest& request, size_t selected) const {

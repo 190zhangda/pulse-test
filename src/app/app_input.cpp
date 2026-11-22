@@ -32,6 +32,7 @@
 #include "window_arrange_ui.h"
 #include "app_updates.h"
 #include "app_internal.h"
+#include "../fs/ftp_url.h"
 #include "global_search_controller.h"
 #include "selection_caps.h"
 #include "app_input.h"
@@ -3570,7 +3571,16 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             if (!s->duplicateScan.scanning) {
                 std::wstring path;
                 if (PickFolder(*s, path, l10n::Get(l10n::StringId::DupFolderPlaceholder).c_str(), L"duplicates", {}, true)) {
-                    s->duplicateScan.folder_path = std::move(path);
+                    // An ftp:// folder is scanned through a local mirror; the
+                    // signed-in text stays in memory, the saved path does not
+                    // carry the password.
+                    fs::FtpUrl remote;
+                    if (fs::ParseFtpUrl(path, remote)) {
+                        s->duplicateScan.ftp_credentials = path;
+                        s->duplicateScan.folder_path = fs::FtpCanonicalText(remote);
+                    } else {
+                        s->duplicateScan.folder_path = std::move(path);
+                    }
                     PersistDuplicateScanPrefs(*s);
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }

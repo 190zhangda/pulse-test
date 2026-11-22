@@ -12,6 +12,7 @@
 #include "ftp_cache.h"
 #include "ftp_ops.h"
 #include "ftp_registry.h"
+#include "duplicate_scan.h"
 #include "../fs/ftp_url.h"
 #include "git_ui.h"
 #include "mtime_hint_prefs.h"
@@ -6258,6 +6259,12 @@ void ApplyFtpCacheReady(AppState& s, const app::FtpCacheResult& result) {
 }
 
 void ApplyFtpOpsDone(AppState& s, const app::FtpOpResult& result) {
+    // The duplicate finder asked for this delete: drop the rows it removed so
+    // the groups stop offering files that are gone from the server.
+    if (s.duplicateScan.IsFtpScan() && !result.sources.empty() &&
+        _wcsicmp(result.folder.c_str(), s.duplicateScan.ftp_source_root.c_str()) == 0) {
+        s.duplicateScan.RemoveDeleted(result.sources);
+    }
     if (result.error != 0) {
         using I = l10n::StringId;
         I message = I::DirectoryUnavailable;

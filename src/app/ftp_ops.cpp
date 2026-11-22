@@ -108,6 +108,31 @@ void DownloadTree(FtpOpResult& result, const std::wstring& remote, const std::ws
     }
 }
 
+// Recursively mirrors an ftp:// folder into a local directory so the
+// Pulse.Content duplicate scanner (Win32 paths only) can read it. `remote` on
+// the first call carries the password; child URLs from ListFolder are
+// canonical, which reuse the logged-in connection held by the registry.
+FtpError DownloadScanTree(const std::wstring& remote, const std::wstring& local) {
+    if (Cancelled()) return FtpError::Cancelled;
+    std::vector<fs::DirEntry> rows;
+    const FtpError listed =
+        FtpRegistry::Instance().ListFolder(remote, rows, [] { return Cancelled(); });
+    if (listed != FtpError::None) {
+        // Some servers refuse to list a single file: try RETR.
+        return FtpRegistry::Instance().Download(remote, local, [] { return Cancelled(); });
+    }
+    CreateDirectoryW(local.c_str(), nullptr);
+    for (const fs::DirEntry& row : rows) {
+        if (Cancelled()) return FtpError::Cancelled;
+        const std::wstring child = JoinLocal(local, row.name);
+        const FtpError error = row.is_dir
+            ? DownloadScanTree(row.full_path, child)
+            : FtpRegistry::Instance().Download(row.full_path, child, [] { return Cancelled(); });
+        if (error != FtpError::None) return error;
+    }
+    return FtpError::None;
+}
+
 void DeleteOne(FtpOpResult& result, const std::wstring& remote, bool directory) {
     FtpRegistry& registry = FtpRegistry::Instance();
     const FtpError error = directory
@@ -121,6 +146,7 @@ void DeleteOne(FtpOpResult& result, const std::wstring& remote, bool directory) 
 FtpOpResult RunRequest(const FtpOpRequest& request) {
     FtpOpResult result;
     result.folder = request.folder;
+    result.sources = request.sources;
     switch (request.kind) {
     case FtpOpKind::Upload:
         for (const std::wstring& local : request.sources) {
@@ -221,6 +247,31 @@ void FtpOps::Shutdown() {
     // threads give up between files once `stopping` is set.
     stopping.store(true);
     for (int waited = 0; waited < 100 && active.load() > 0; ++waited) Sleep(50);
+}
+
+bool FtpOps::DownloadForScan(const std::wstring& credentials_url,
+                             const std::wstring& local_root, HWND window,
+                             uint64_t generation) {
+    if (credentials_url.empty() || local_root.empty() || !window) return false;
+    stopping.store(false);
+    active.fetch_add(1);
+    std::thread([credentials_url, local_root, window, generation]() {
+        const FtpError error = DownloadScanTree(credentials_url, local_root);
+        diagnostics::runtime::Event("ftp_scan_download",
+                                    {{"error", static_cast<uint64_t>(error)},
+                                     {"generation", generation}});
+        if (!stopping.load()) {
+            auto* done = new FtpScanDownloadResult;
+            done->local_root = local_root;
+            done->generation = generation;
+            done->error = static_cast<uint8_t>(error);
+            if (!PostMessageW(window, WM_FTP_SCAN_DOWNLOAD, 0,
+                              reinterpret_cast<LPARAM>(done)))
+                delete done;
+        }
+        active.fetch_sub(1);
+    }).detach();
+    return true;
 }
 
 void FtpOps::SetCopied(std::vector<std::wstring> urls) {

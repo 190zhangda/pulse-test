@@ -3201,6 +3201,13 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
 
+    case WM_FTP_SCAN_DOWNLOAD: {
+        std::unique_ptr<app::FtpScanDownloadResult> result(
+            reinterpret_cast<app::FtpScanDownloadResult*>(lParam));
+        if (s && result) ApplyFtpScanDownload(*s, *result);
+        return 0;
+    }
+
     case WM_NETWORK_CONNECT: {
         std::unique_ptr<app::NetworkConnectResult> result(
             reinterpret_cast<app::NetworkConnectResult*>(lParam));

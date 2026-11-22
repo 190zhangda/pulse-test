@@ -17,6 +17,10 @@ namespace ops { struct OpRequest; }
 
 namespace app {
 
+// ftp_ops.h: the result of the mirror download that precedes a scan of an
+// ftp:// folder.
+struct FtpScanDownloadResult;
+
 enum class DuplicateScanScope : int {
     Folder = 0,
     Drive = 1,
@@ -57,6 +61,16 @@ struct DuplicateScanSession {
     std::vector<DuplicateGroup> groups;
     uint64_t result_epoch = 0;
 
+    // A scan of an ftp:// folder is mirrored to a local cache first (the
+    // Pulse.Content scanner only understands Win32 paths). These remember the
+    // mapping so hits can be shown as ftp:// paths and cleanup deletes on the
+    // server instead of the local mirror. `ftp_source_root` is canonical text
+    // without a password; `ftp_credentials` carries the original signed-in URL
+    // (password included) that transfers must use.
+    std::wstring ftp_source_root;
+    std::wstring ftp_credentials;
+    std::wstring ftp_local_root;
+
     static uint64_t DefaultMinimumBytes(DuplicateScanScope scope) noexcept;
     static std::wstring NormalizeDriveRoot(std::wstring root);
     static std::vector<std::wstring> ResolveRoots(
@@ -66,15 +80,24 @@ struct DuplicateScanSession {
     void ResetResults();
     void ApplyUpdate(const index::ContentSearchProgress& progress,
                      const std::vector<index::ContentHit>& hits);
+    void SetFtpMapping(std::wstring source_root, std::wstring credentials,
+                       std::wstring local_root);
+    void ClearFtpMapping();
+    bool IsFtpScan() const noexcept { return !ftp_local_root.empty(); }
     void SetKeep(size_t group, size_t file);
     std::vector<std::wstring> FilesToDelete(size_t group) const;
     std::vector<std::wstring> AllFilesToDelete() const;
     bool BuildCleanupRequest(ops::OpRequest& request, size_t group = SIZE_MAX) const;
+    // FTP cleanup: the extra rows of `selected` (or every group) as ftp://
+    // URLs; the caller deletes them on the server via FtpOps.
+    std::vector<std::wstring> FtpFilesToDelete(size_t group) const;
+    std::vector<std::wstring> AllFtpFilesToDelete() const;
     void RemoveDeleted(const std::vector<std::wstring>& paths);
     size_t ExtraCount() const;
 
 private:
     void AppendHits(const std::vector<index::ContentHit>& hits);
+    std::wstring MapLocalToFtp(const std::wstring& path) const;
     void SortGroups();
     void RebuildGroupIndex();
     void UpdateSpeed(const index::ContentSearchProgress& progress);
@@ -89,6 +112,9 @@ private:
 
 } // namespace app
 
+// The recursive download that mirrors an ftp:// folder (ftp_ops.h) finished:
+// point the session at the local copy and run the ordinary scan.
+void ApplyFtpScanDownload(AppState& s, const app::FtpScanDownloadResult& result);
 void StartDuplicateScan(AppState& s);
 void CancelDuplicateScan(AppState& s);
 void RecycleDuplicateGroup(AppState& s, size_t group);
