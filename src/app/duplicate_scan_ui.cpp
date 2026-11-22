@@ -204,6 +204,9 @@ void ApplyFtpScanDownload(AppState& s, const app::FtpScanDownloadResult& result)
 
 void CancelDuplicateScan(AppState& s) {
     s.duplicateSearch.Cancel();
+    // A mirror download may still be running: bumping the generation makes its
+    // result stale, so a cancelled scan cannot start one moment later.
+    if (s.duplicateScan.scanning) s.duplicateScan.generation += 1;
     s.duplicateScan.scanning = false;
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
