@@ -525,7 +525,7 @@ void DeleteSelected(AppState& s, bool permanent) {
         ui::ConfirmDialogSpec confirm;
         confirm.title = l10n::Get(l10n::StringId::PermanentDelete);
         wchar_t message[256]{};
-        swprintf_s(message, l10n::Get(l10n::StringId::FtpDeleteConfirmFormat).c_str(),
+        swprintf_s(message, l10n::Get(l10n::StringId::RecycleDeleteConfirmFormat).c_str(),
                    item_count);
         confirm.message = message;
         confirm.confirm_text = l10n::Get(l10n::StringId::PermanentDelete);
