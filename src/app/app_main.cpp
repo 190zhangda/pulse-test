@@ -255,6 +255,7 @@ bool TestAiBroker() {
 #include "window_switcher_ui.h"
 #include <imm.h>
 #include "duplicate_scan.h"
+#include "../fs/ftp_url.h"
 #include "shell_tag_menu.h"
 #include "quick_look_mode.h"
 #include "quick_look_verb.h"
@@ -5570,8 +5571,18 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
             // Verification hook: start the duplicate scan as soon as the shell is up, so a
             // scripted run can follow the ftp mirror and the scan without clicking the page.
             wchar_t duplicate_probe[32]{};
-            if (GetEnvironmentVariableW(L"PULSE_TEST_DUP_SCAN", duplicate_probe, ARRAYSIZE(duplicate_probe)))
+            if (GetEnvironmentVariableW(L"PULSE_TEST_DUP_SCAN", duplicate_probe, ARRAYSIZE(duplicate_probe))) {
+                const bool ftp_folder = fs::IsFtpUrl(state.duplicateScan.folder_path);
+                diagnostics::runtime::Event("dup_scan_hook",
+                                            {{"scope", static_cast<uint64_t>(state.duplicateScan.scope)},
+                                             {"ftp", ftp_folder ? 1ull : 0ull},
+                                             {"has_folder", state.duplicateScan.folder_path.empty() ? 0ull : 1ull}});
                 StartDuplicateScan(state);
+                diagnostics::runtime::Event("dup_scan_hook_done",
+                                            {{"scanning", state.duplicateScan.scanning ? 1ull : 0ull},
+                                             {"is_ftp", state.duplicateScan.IsFtpScan() ? 1ull : 0ull},
+                                             {"error", static_cast<uint64_t>(state.duplicateScan.error)}});
+            }
         }
         if (state.isolatedTest && state.shot.active) {
             wchar_t fixture[256]{};
