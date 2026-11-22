@@ -5613,6 +5613,23 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
                         diagnostics::runtime::TextEvent("dup_scan_probe_file", {{"path", file.path}},
                                                         {{"group", group}});
                 }
+                // Optional tail of the probe: drop every extra copy. The page
+                // asks for confirmation first; here the scan is the only thing
+                // running, so the delete can follow straight on.
+                if (GetEnvironmentVariableW(L"PULSE_TEST_DUP_SCAN_DELETE", nullptr, 0)) {
+                    RecycleAllDuplicateExtras(state);
+                    const ULONGLONG delete_until = GetTickCount64() + 60000;
+                    while (GetTickCount64() < delete_until) {
+                        while (PeekMessageW(&probe_message, nullptr, 0, 0, PM_REMOVE)) {
+                            TranslateMessage(&probe_message);
+                            DispatchMessageW(&probe_message);
+                        }
+                        ProcessPendingResults(state);
+                        Sleep(20);
+                    }
+                    diagnostics::runtime::Event("dup_scan_probe_deleted",
+                                                {{"groups", static_cast<uint64_t>(state.duplicateScan.groups.size())}});
+                }
             }
         }
         if (state.isolatedTest && state.shot.active) {
