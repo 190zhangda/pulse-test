@@ -2,6 +2,7 @@
 #include "../ops/ops_manager.h"
 #include "../common/path_utils.h"
 #include "../fs/ftp_url.h"
+#include "../common/runtime_log.h"
 
 #include <algorithm>
 #include <unordered_map>
@@ -198,6 +199,11 @@ void DuplicateScanSession::AppendHits(const std::vector<index::ContentHit>& hits
     for (const auto& hit : hits) {
         if (hit.group == 0 || invalidated_groups_.contains(hit.group)) continue;
         std::wstring display_path = MapLocalToFtp(hit.path);
+        if (display_path != hit.path) {
+            // Proves the mirror's local path made it back to the server's own spelling.
+            diagnostics::runtime::TextEvent("ftp_scan_hit", {{"local", hit.path}},
+                                            {{"mapped", 1}});
+        }
         std::wstring display_name = hit.name.empty() ? display_path : hit.name;
         DuplicateFile file{std::move(display_path), std::move(display_name),
                            hit.size, hit.modified};

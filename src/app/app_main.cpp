@@ -5566,6 +5566,13 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
             return result;
         }
 #endif
+        if (state.isolatedTest) {
+            // Verification hook: start the duplicate scan as soon as the shell is up, so a
+            // scripted run can follow the ftp mirror and the scan without clicking the page.
+            wchar_t duplicate_probe[32]{};
+            if (GetEnvironmentVariableW(L"PULSE_TEST_DUP_SCAN", duplicate_probe, ARRAYSIZE(duplicate_probe)))
+                StartDuplicateScan(state);
+        }
         if (state.isolatedTest && state.shot.active) {
             wchar_t fixture[256]{};
             if (GetEnvironmentVariableW(L"PULSE_TEST_TAB_LAYOUT",fixture,ARRAYSIZE(fixture))) {
