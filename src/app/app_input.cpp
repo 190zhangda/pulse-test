@@ -3569,7 +3569,7 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
         } else if (hit.region == ui::HitTestResult::SettingsDupBrowse) {
             if (!s->duplicateScan.scanning) {
                 std::wstring path;
-                if (PickFolder(*s, path, l10n::Get(l10n::StringId::DupFolderPlaceholder).c_str(), L"duplicates")) {
+                if (PickFolder(*s, path, l10n::Get(l10n::StringId::DupFolderPlaceholder).c_str(), L"duplicates", {}, true)) {
                     s->duplicateScan.folder_path = std::move(path);
                     PersistDuplicateScanPrefs(*s);
                     InvalidateRect(hwnd, nullptr, FALSE);

@@ -6075,8 +6075,9 @@ bool PickToolbarAppFile(AppState& s, HWND owner, std::wstring& path) {
 }
 
 bool PickFolder(AppState& s, std::wstring& path, const wchar_t* title, std::wstring_view history_key,
-                std::wstring_view initial) {
+                std::wstring_view initial, bool accept_ftp_url) {
     ui::FolderPickerSpec spec = MakePickerSpec(s, ui::PickerMode::Folder);
+    spec.accept_ftp_url = accept_ftp_url;
     spec.title = title ? title : L"";
     // Empty when this entry point has no history: the picker's last folder.
     spec.initial_path = initial.empty() ? std::wstring(s.appPrefs.PickerFolder(history_key))

@@ -110,6 +110,9 @@ struct FolderPickerSpec {
     bool validate_local_open_access_v1 = false;
     bool validate_local_save_access_v1 = false; // Worker probes may briefly create/delete a new target.
     bool no_dereference_links = false; // Treat .lnk as a file, including broken links.
+    // Opt-in: accept a typed ftp:// URL in the address bar as the picked folder
+    // (the duplicate-folder picker uses this). Off everywhere else.
+    bool accept_ftp_url = false;
     // Optional embedded-provider hooks, invoked on this window's Show thread.
     // Defaults preserve the ordinary standalone picker path.
     HINSTANCE module_instance = nullptr;

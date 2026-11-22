@@ -22,6 +22,7 @@
 #include "../app/create_rename_intent.h"
 #include "edit_host.h"
 #include "../fs/drive_kind.h"
+#include "../fs/ftp_url.h"
 #include "../common/windows_compat.h"
 #include "folder_picker_dialog.h"
 #include "../common/picker_navigation.h"
@@ -2142,6 +2143,22 @@ private:
         if (text == l10n::Get(l10n::StringId::ThisPc) || text.empty()) {
             Navigate(L"", true);
             return;
+        }
+        // Opt-in (duplicate-folder picker): accept a typed ftp:// URL verbatim,
+        // keeping credentials in the raw text so the caller can sign in later.
+        // This is deliberately separate from the loader path: Win32 validation
+        // rejects virtual URLs with ERROR_NOT_SUPPORTED.
+        if (spec_.accept_ftp_url) {
+            fs::FtpUrl ftp;
+            if (fs::ParseFtpUrl(text, ftp)) {
+                chrome_.notice.clear();
+                validating_ = false;
+                result_.assign(1, text);
+                done_ = true;
+                PostMessageW(hwnd_, WM_NULL, 0, 0);
+                Invalidate();
+                return;
+            }
         }
         if (!loader_) return;
         validation_navigation_only_ = true;
