@@ -5570,18 +5570,23 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         if (state.isolatedTest) {
             // Verification hook: start the duplicate scan as soon as the shell is up, so a
             // scripted run can follow the ftp mirror and the scan without clicking the page.
-            wchar_t duplicate_probe[32]{};
-            if (GetEnvironmentVariableW(L"PULSE_TEST_DUP_SCAN", duplicate_probe, ARRAYSIZE(duplicate_probe))) {
-                const bool ftp_folder = fs::IsFtpUrl(state.duplicateScan.folder_path);
+            // The value is the folder to scan (an ftp:// URL included): an isolated instance
+            // does not load app.json, so the probe brings its own root.
+            std::vector<wchar_t> duplicate_probe(32768);
+            if (GetEnvironmentVariableW(L"PULSE_TEST_DUP_SCAN", duplicate_probe.data(),
+                                        static_cast<DWORD>(duplicate_probe.size()))) {
+                state.duplicateScan.scope = app::DuplicateScanScope::Folder;
+                state.duplicateScan.folder_path = duplicate_probe.data();
+                state.duplicateScan.minimum_file_bytes =
+                    app::DuplicateScanSession::DefaultMinimumBytes(state.duplicateScan.scope);
                 diagnostics::runtime::Event("dup_scan_hook",
-                                            {{"scope", static_cast<uint64_t>(state.duplicateScan.scope)},
-                                             {"ftp", ftp_folder ? 1ull : 0ull},
-                                             {"has_folder", state.duplicateScan.folder_path.empty() ? 0ull : 1ull}});
+                                            {{"ftp", fs::IsFtpUrl(state.duplicateScan.folder_path) ? 1ull : 0ull}});
                 StartDuplicateScan(state);
                 diagnostics::runtime::Event("dup_scan_hook_done",
                                             {{"scanning", state.duplicateScan.scanning ? 1ull : 0ull},
                                              {"is_ftp", state.duplicateScan.IsFtpScan() ? 1ull : 0ull},
-                                             {"error", static_cast<uint64_t>(state.duplicateScan.error)}});
+                                             {"error", static_cast<uint64_t>(state.duplicateScan.error)},
+                                             {"generation", state.duplicateScan.generation}});
             }
         }
         if (state.isolatedTest && state.shot.active) {
