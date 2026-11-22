@@ -6259,12 +6259,12 @@ void ApplyFtpCacheReady(AppState& s, const app::FtpCacheResult& result) {
 }
 
 void ApplyFtpOpsDone(AppState& s, const app::FtpOpResult& result) {
-    // The duplicate finder asked for this delete: drop the rows it removed so
-    // the groups stop offering files that are gone from the server.
-    if (s.duplicateScan.IsFtpScan() && !result.sources.empty() &&
-        _wcsicmp(result.folder.c_str(), s.duplicateScan.ftp_source_root.c_str()) == 0) {
-        s.duplicateScan.RemoveDeleted(result.sources);
-    }
+    // The duplicate finder's delete: when the server lost every file the
+    // request named, drop those rows so the groups stop offering them. A
+    // partial failure leaves the rows alone; the next scan sees the truth.
+    const bool duplicate_delete = !result.sources.empty() &&
+        s.duplicateScan.IsFtpScan() &&
+        _wcsicmp(result.folder.c_str(), s.duplicateScan.ftp_source_root.c_str()) == 0;
     if (result.error != 0) {
         using I = l10n::StringId;
         I message = I::DirectoryUnavailable;
@@ -6275,6 +6275,8 @@ void ApplyFtpOpsDone(AppState& s, const app::FtpOpResult& result) {
             tab->banner_message = l10n::Get(message);
         }
         pulse::diagnostics::runtime::Event("ftp_op_error", {{"error", static_cast<uint64_t>(result.error)}});
+    } else if (duplicate_delete) {
+        s.duplicateScan.RemoveDeleted(result.sources);
     }
     app::Tab* tab = ActiveTab(s);
     if (tab && _wcsicmp(tab->current_path.c_str(), result.folder.c_str()) == 0) {
