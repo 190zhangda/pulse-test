@@ -128,23 +128,25 @@ void DuplicateScanSession::ClearFtpMapping() {
     ftp_local_root.clear();
 }
 
-std::wstring DuplicateScanSession::MapLocalToFtp(const std::wstring& path) const {
-    if (!IsFtpScan() || path.empty()) return path;
+std::wstring DuplicateScanSession::MapLocalToFtp(const std::wstring& raw) const {
+    if (!IsFtpScan() || raw.empty()) return raw;
     // The local mirror is rooted at ftp_local_root; a hit below it maps to the
-    // same subtree on the server. Compare case-insensitively (Windows paths)
-    // and keep the original ftp_source_root (which carries the user, and may
-    // be typed with any letter case).
-    if (path.size() <= ftp_local_root.size()) return path;
+    // same subtree on the server. The scanner reports plain paths, but strip
+    // the extended prefix anyway so a hit is never left looking local. Compare
+    // case-insensitively (Windows paths) and keep the original
+    // ftp_source_root, which carries the user name as it was typed.
+    const std::wstring path = path::StripExtendedPathPrefix(raw);
+    if (path.size() <= ftp_local_root.size()) return raw;
     if (CompareStringOrdinal(path.c_str(), static_cast<int>(ftp_local_root.size()),
                              ftp_local_root.c_str(), static_cast<int>(ftp_local_root.size()),
                              TRUE) != CSTR_EQUAL)
-        return path;
+        return raw;
     const wchar_t separator = path[ftp_local_root.size()];
-    if (separator != L'\\' && separator != L'/') return path;
+    if (separator != L'\\' && separator != L'/') return raw;
     std::wstring relative = path.substr(ftp_local_root.size() + 1);
     std::replace(relative.begin(), relative.end(), L'\\', L'/');
     fs::FtpUrl base;
-    if (!fs::ParseFtpUrl(ftp_source_root, base)) return path;
+    if (!fs::ParseFtpUrl(ftp_source_root, base)) return raw;
     base.path = fs::FtpJoinPath(base.path, relative);
     return fs::FtpCanonicalText(base);
 }
