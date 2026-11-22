@@ -5587,6 +5587,29 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
                                              {"is_ftp", state.duplicateScan.IsFtpScan() ? 1ull : 0ull},
                                              {"error", static_cast<uint64_t>(state.duplicateScan.error)},
                                              {"generation", state.duplicateScan.generation}});
+                // The probe's whole point is the finished scan: a shot run leaves
+                // as soon as the first frame is ready, so hold the pump here until
+                // the mirror download and the duplicate pass have both landed.
+                const ULONGLONG wait_until = GetTickCount64() + 180000;
+                MSG probe_message{};
+                while (state.duplicateScan.scanning && GetTickCount64() < wait_until) {
+                    while (PeekMessageW(&probe_message, nullptr, 0, 0, PM_REMOVE)) {
+                        TranslateMessage(&probe_message);
+                        DispatchMessageW(&probe_message);
+                    }
+                    ProcessPendingResults(state);
+                    Sleep(20);
+                }
+                diagnostics::runtime::Event("dup_scan_probe_end",
+                                            {{"scanning", state.duplicateScan.scanning ? 1ull : 0ull},
+                                             {"completed", state.duplicateScan.completed ? 1ull : 0ull},
+                                             {"error", static_cast<uint64_t>(state.duplicateScan.error)},
+                                             {"groups", static_cast<uint64_t>(state.duplicateScan.groups.size())}});
+                for (size_t group = 0; group < state.duplicateScan.groups.size(); ++group) {
+                    for (const auto& file : state.duplicateScan.groups[group].files)
+                        diagnostics::runtime::TextEvent("dup_scan_probe_file", {{"path", file.path}},
+                                                        {{"group", group}});
+                }
             }
         }
         if (state.isolatedTest && state.shot.active) {
