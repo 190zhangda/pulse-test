@@ -50,6 +50,9 @@ struct FtpScanDownloadResult {
     std::wstring local_root;
     uint64_t generation = 0;
     uint8_t error = 0;      // app::FtpError
+    // Rows the account may not read (a phone's protected folders): the mirror
+    // is scanned without them rather than not scanned at all.
+    uint64_t skipped = 0;
 };
 
 class FtpOps {

@@ -108,11 +108,21 @@ void DownloadTree(FtpOpResult& result, const std::wstring& remote, const std::ws
     }
 }
 
+// A folder that the account may not read, or a row that vanished between the
+// listing and the transfer, must not sink the whole mirror: a phone's storage
+// is full of protected folders, and one of them would otherwise abort the scan.
+bool SkippableScanError(FtpError error) {
+    return error == FtpError::NotFound || error == FtpError::Denied;
+}
+
 // Recursively mirrors an ftp:// folder into a local directory so the
 // Pulse.Content duplicate scanner (Win32 paths only) can read it. `remote` on
 // the first call carries the password; child URLs from ListFolder are
 // canonical, which reuse the logged-in connection held by the registry.
-FtpError DownloadScanTree(const std::wstring& remote, const std::wstring& local) {
+// `skipped` counts the rows left out, so the caller can say how complete the
+// mirror is instead of pretending it is whole.
+FtpError DownloadScanTree(const std::wstring& remote, const std::wstring& local,
+                          uint64_t& skipped) {
     if (Cancelled()) return FtpError::Cancelled;
     std::vector<fs::DirEntry> rows;
     const FtpError listed =
@@ -126,9 +136,16 @@ FtpError DownloadScanTree(const std::wstring& remote, const std::wstring& local)
         if (Cancelled()) return FtpError::Cancelled;
         const std::wstring child = JoinLocal(local, row.name);
         const FtpError error = row.is_dir
-            ? DownloadScanTree(row.full_path, child)
+            ? DownloadScanTree(row.full_path, child, skipped)
             : FtpRegistry::Instance().Download(row.full_path, child, [] { return Cancelled(); });
-        if (error != FtpError::None) return error;
+        if (error == FtpError::None) continue;
+        if (SkippableScanError(error)) {
+            ++skipped;
+            // A folder that could not be read leaves nothing behind to compare.
+            if (row.is_dir) RemoveDirectoryW(child.c_str());
+            continue;
+        }
+        return error;
     }
     return FtpError::None;
 }
@@ -256,15 +273,18 @@ bool FtpOps::DownloadForScan(const std::wstring& credentials_url,
     stopping.store(false);
     active.fetch_add(1);
     std::thread([credentials_url, local_root, window, generation]() {
-        const FtpError error = DownloadScanTree(credentials_url, local_root);
+        uint64_t skipped = 0;
+        const FtpError error = DownloadScanTree(credentials_url, local_root, skipped);
         diagnostics::runtime::Event("ftp_scan_download",
                                     {{"error", static_cast<uint64_t>(error)},
-                                     {"generation", generation}});
+                                     {"generation", generation},
+                                     {"skipped", skipped}});
         if (!stopping.load()) {
             auto* done = new FtpScanDownloadResult;
             done->local_root = local_root;
             done->generation = generation;
             done->error = static_cast<uint8_t>(error);
+            done->skipped = skipped;
             if (!PostMessageW(window, WM_FTP_SCAN_DOWNLOAD, 0,
                               reinterpret_cast<LPARAM>(done)))
                 delete done;

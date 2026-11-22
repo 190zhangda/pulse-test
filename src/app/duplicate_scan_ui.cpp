@@ -3,6 +3,7 @@
 #include "../fs/fs_enum.h"
 #include "../fs/ftp_url.h"
 #include "../common/localization.h"
+#include "../common/runtime_log.h"
 #include "app_messages.h"
 #include "content_pack_ui.h"
 #include "ftp_ops.h"
@@ -210,6 +211,10 @@ void ApplyFtpScanDownload(AppState& s, const app::FtpScanDownloadResult& result)
         InvalidateRect(s.hwnd, nullptr, FALSE);
         return;
     }
+    // Protected folders on the server were left out of the mirror; the scan
+    // itself is fine, so say so plainly instead of reporting no duplicates.
+    if (result.skipped != 0)
+        diagnostics::runtime::Event("ftp_scan_skipped", {{"rows", result.skipped}});
     RunDuplicateSearch(s, {result.local_root});
 }
 
