@@ -122,13 +122,16 @@ bool SkippableScanError(FtpError error) {
 // `skipped` counts the rows left out, so the caller can say how complete the
 // mirror is instead of pretending it is whole.
 FtpError DownloadScanTree(const std::wstring& remote, const std::wstring& local,
-                          uint64_t& skipped) {
+                          uint64_t& skipped, bool known_directory = false) {
     if (Cancelled()) return FtpError::Cancelled;
     std::vector<fs::DirEntry> rows;
     const FtpError listed =
         FtpRegistry::Instance().ListFolder(remote, rows, [] { return Cancelled(); });
     if (listed != FtpError::None) {
-        // Some servers refuse to list a single file: try RETR.
+        // A row the listing already called a folder stays a folder: asking for
+        // its bytes would only turn "denied" into a misleading "not found".
+        if (known_directory) return listed;
+        // The top-level argument may name a single file, which mlsd/list refuse.
         return FtpRegistry::Instance().Download(remote, local, [] { return Cancelled(); });
     }
     CreateDirectoryW(local.c_str(), nullptr);
@@ -136,7 +139,7 @@ FtpError DownloadScanTree(const std::wstring& remote, const std::wstring& local,
         if (Cancelled()) return FtpError::Cancelled;
         const std::wstring child = JoinLocal(local, row.name);
         const FtpError error = row.is_dir
-            ? DownloadScanTree(row.full_path, child, skipped)
+            ? DownloadScanTree(row.full_path, child, skipped, true)
             : FtpRegistry::Instance().Download(row.full_path, child, [] { return Cancelled(); });
         if (error == FtpError::None) continue;
         if (SkippableScanError(error)) {
