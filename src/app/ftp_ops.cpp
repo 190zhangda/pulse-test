@@ -144,9 +144,9 @@ FtpError DownloadScanTree(const std::wstring& remote, const std::wstring& local,
         // asking for their bytes would only turn "denied" into "not found".
         if (named_by_row) return listed;
         // Only the caller's own argument may name a single file, and only a
-        // listing that failed for a "not a folder" reason is worth retrying as
+        // listing that failed because it was not a folder is worth retrying as
         // one: a refused or timed-out listing must keep its own code.
-        if (listed != FtpError::NotFound && listed != FtpError::Protocol) return listed;
+        if (listed != FtpError::NotFound) return listed;
         FtpError fetched = FtpRegistry::Instance().Download(remote, local, [] { return Cancelled(); });
         if (fetched != FtpError::None && RetryableScanError(fetched)) {
             fetched = FtpRegistry::Instance().Download(remote, local, [] { return Cancelled(); });
