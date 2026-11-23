@@ -1163,6 +1163,10 @@ void StartDragOut(AppState& s) {
     if(DeferContentSelection(s,[](AppState& v){if(GetKeyState(VK_LBUTTON)&0x8000) StartDragOut(v);})) return;
     app::Tab* tab = ActiveTab(s);
     if (!tab || !tab->snapshot || IsRecycleTab(tab)) return;
+    // A server row has no local file to hand over: dragging its ftp:// text
+    // would show a drag and deliver nothing every target can refuse. Copy and
+    // paste stages the URLs and downloads them, so point the user at that.
+    if (fs::IsFtpUrl(tab->current_path)) return;
     const app::SelectionCaps caps = app::ComputeSelectionCaps(*tab, &s.places);
     if (!caps.copy && !caps.cut) return;
     const bool device = IsDeviceTab(tab);
