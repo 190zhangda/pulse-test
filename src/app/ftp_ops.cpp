@@ -142,7 +142,8 @@ bool RetryableTransferError(FtpError error) {
 // mirror is instead of pretending it is whole.
 FtpError DownloadScanTree(const std::wstring& remote, const std::wstring& local,
                           uint64_t& skipped, bool named_by_row = false,
-                          bool named_by_caller = false) {
+                          bool named_by_caller = false,
+                          uint64_t minimum_bytes = 0) {
     if (Cancelled()) return FtpError::Cancelled;
     std::vector<fs::DirEntry> rows;
     FtpError listed =
@@ -168,8 +169,12 @@ FtpError DownloadScanTree(const std::wstring& remote, const std::wstring& local,
     for (const fs::DirEntry& row : rows) {
         if (Cancelled()) return FtpError::Cancelled;
         const std::wstring child = JoinLocal(local, row.name);
+        // The scanner drops anything under its minimum size, so copying such a
+        // row would only spend the link's time on a file nobody looks at.
+        if (!row.is_dir && minimum_bytes != 0 && row.size != 0 && row.size < minimum_bytes)
+            continue;
         FtpError error = row.is_dir
-            ? DownloadScanTree(row.full_path, child, skipped, true)
+            ? DownloadScanTree(row.full_path, child, skipped, true, false, minimum_bytes)
             : FtpRegistry::Instance().Download(row.full_path, child, [] { return Cancelled(); });
         if (error != FtpError::None && RetryableTransferError(error) && !row.is_dir) {
             error = FtpRegistry::Instance().Download(row.full_path, child, [] { return Cancelled(); });
@@ -304,13 +309,14 @@ void FtpOps::Shutdown() {
 
 bool FtpOps::DownloadForScan(const std::wstring& credentials_url,
                              const std::wstring& local_root, HWND window,
-                             uint64_t generation) {
+                             uint64_t generation, uint64_t minimum_bytes) {
     if (credentials_url.empty() || local_root.empty() || !window) return false;
     stopping.store(false);
     active.fetch_add(1);
-    std::thread([credentials_url, local_root, window, generation]() {
+    std::thread([credentials_url, local_root, window, generation, minimum_bytes]() {
         uint64_t skipped = 0;
-        const FtpError error = DownloadScanTree(credentials_url, local_root, skipped, false, true);
+        const FtpError error =
+            DownloadScanTree(credentials_url, local_root, skipped, false, true, minimum_bytes);
         diagnostics::runtime::Event("ftp_scan_download",
                                     {{"error", static_cast<uint64_t>(error)},
                                      {"generation", generation},

@@ -182,7 +182,8 @@ void StartDuplicateScan(AppState& s) {
         session.phase = index::ContentSearchPhase::Enumerating;
         session.current_root = canonical;
         if (!app::FtpOps::Instance().DownloadForScan(credentials, local_root, s.hwnd,
-                                                    session.generation)) {
+                                                    session.generation,
+                                                    session.minimum_file_bytes)) {
             session.scanning = false;
             session.completed = true;
             session.error = ERROR_NOT_SUPPORTED;

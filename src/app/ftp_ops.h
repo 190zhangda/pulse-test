@@ -73,7 +73,7 @@ public:
     // `credentials_url` must carry the password for the first connection.
     bool DownloadForScan(const std::wstring& credentials_url,
                          const std::wstring& local_root, HWND window,
-                         uint64_t generation);
+                         uint64_t generation, uint64_t minimum_bytes = 0);
 
     // Ctrl+C on a server's rows: the URLs a later paste into a local folder
     // fetches. Pulse keeps them here because the Windows clipboard is about
