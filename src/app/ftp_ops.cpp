@@ -116,11 +116,18 @@ bool SkippableScanError(FtpError error) {
 }
 
 // A phone may refuse a listing halfway through a long mirror (too many
-// sessions, or the app dropped the control connection). One more attempt after
-// a short pause reconnects, which is worth it before the scan gives up.
-bool RetryableScanError(FtpError error) {
+// sessions, or the app dropped the control connection). One more attempt
+// reconnects, which is worth it before the scan gives up. `NotFound` is in here
+// too: some servers answer a refused folder with 550, which reads as missing.
+bool RetryableListError(FtpError error) {
     return error == FtpError::Denied || error == FtpError::Network ||
-           error == FtpError::Timeout;
+           error == FtpError::Timeout || error == FtpError::NotFound;
+}
+
+// A dropped connection in the middle of a file is worth one more attempt; a
+// missing file stays missing, so it is not repeated.
+bool RetryableTransferError(FtpError error) {
+    return error == FtpError::Network || error == FtpError::Timeout;
 }
 
 // Recursively mirrors an ftp:// folder into a local directory so the
@@ -130,25 +137,25 @@ bool RetryableScanError(FtpError error) {
 // `skipped` counts the rows left out, so the caller can say how complete the
 // mirror is instead of pretending it is whole.
 FtpError DownloadScanTree(const std::wstring& remote, const std::wstring& local,
-                          uint64_t& skipped, bool named_by_row = false) {
+                          uint64_t& skipped, bool named_by_row = false,
+                          bool named_by_caller = false) {
     if (Cancelled()) return FtpError::Cancelled;
     std::vector<fs::DirEntry> rows;
     FtpError listed =
         FtpRegistry::Instance().ListFolder(remote, rows, [] { return Cancelled(); });
-    if (listed != FtpError::None && RetryableScanError(listed)) {
+    if (listed != FtpError::None && RetryableListError(listed)) {
         rows.clear();
         listed = FtpRegistry::Instance().ListFolder(remote, rows, [] { return Cancelled(); });
     }
     if (listed != FtpError::None) {
         // The scan root and every row a listing called a folder are folders:
         // asking for their bytes would only turn "denied" into "not found".
-        if (named_by_row) return listed;
-        // Only the caller's own argument may name a single file, and only a
-        // listing that failed because it was not a folder is worth retrying as
-        // one: a refused or timed-out listing must keep its own code.
+        if (named_by_row || !named_by_caller) return listed;
+        // The caller's own argument may still name a single file, which list
+        // refuses; only a "not a folder" answer is worth fetching as bytes.
         if (listed != FtpError::NotFound) return listed;
         FtpError fetched = FtpRegistry::Instance().Download(remote, local, [] { return Cancelled(); });
-        if (fetched != FtpError::None && RetryableScanError(fetched)) {
+        if (fetched != FtpError::None && RetryableTransferError(fetched)) {
             fetched = FtpRegistry::Instance().Download(remote, local, [] { return Cancelled(); });
         }
         return fetched;
@@ -160,7 +167,7 @@ FtpError DownloadScanTree(const std::wstring& remote, const std::wstring& local,
         FtpError error = row.is_dir
             ? DownloadScanTree(row.full_path, child, skipped, true)
             : FtpRegistry::Instance().Download(row.full_path, child, [] { return Cancelled(); });
-        if (error != FtpError::None && RetryableScanError(error) && !row.is_dir) {
+        if (error != FtpError::None && RetryableTransferError(error) && !row.is_dir) {
             error = FtpRegistry::Instance().Download(row.full_path, child, [] { return Cancelled(); });
         }
         if (error == FtpError::None) continue;
@@ -299,7 +306,7 @@ bool FtpOps::DownloadForScan(const std::wstring& credentials_url,
     active.fetch_add(1);
     std::thread([credentials_url, local_root, window, generation]() {
         uint64_t skipped = 0;
-        const FtpError error = DownloadScanTree(credentials_url, local_root, skipped);
+        const FtpError error = DownloadScanTree(credentials_url, local_root, skipped, false, true);
         diagnostics::runtime::Event("ftp_scan_download",
                                     {{"error", static_cast<uint64_t>(error)},
                                      {"generation", generation},
