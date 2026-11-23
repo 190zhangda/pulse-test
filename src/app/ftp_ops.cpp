@@ -112,7 +112,11 @@ void DownloadTree(FtpOpResult& result, const std::wstring& remote, const std::ws
 // listing and the transfer, must not sink the whole mirror: a phone's storage
 // is full of protected folders, and one of them would otherwise abort the scan.
 bool SkippableScanError(FtpError error) {
-    return error == FtpError::NotFound || error == FtpError::Denied;
+    // Timeout belongs here too: a phone on Wi-Fi answers most rows quickly and
+    // then stalls on one large file. Aborting the whole mirror for that single
+    // row loses everything already copied.
+    return error == FtpError::NotFound || error == FtpError::Denied ||
+           error == FtpError::Timeout;
 }
 
 // A phone may refuse a listing halfway through a long mirror (too many
