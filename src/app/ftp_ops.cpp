@@ -115,6 +115,14 @@ bool SkippableScanError(FtpError error) {
     return error == FtpError::NotFound || error == FtpError::Denied;
 }
 
+// A phone may refuse a listing halfway through a long mirror (too many
+// sessions, or the app dropped the control connection). One more attempt after
+// a short pause reconnects, which is worth it before the scan gives up.
+bool RetryableScanError(FtpError error) {
+    return error == FtpError::Denied || error == FtpError::Network ||
+           error == FtpError::Timeout;
+}
+
 // Recursively mirrors an ftp:// folder into a local directory so the
 // Pulse.Content duplicate scanner (Win32 paths only) can read it. `remote` on
 // the first call carries the password; child URLs from ListFolder are
@@ -122,25 +130,39 @@ bool SkippableScanError(FtpError error) {
 // `skipped` counts the rows left out, so the caller can say how complete the
 // mirror is instead of pretending it is whole.
 FtpError DownloadScanTree(const std::wstring& remote, const std::wstring& local,
-                          uint64_t& skipped, bool known_directory = false) {
+                          uint64_t& skipped, bool named_by_row = false) {
     if (Cancelled()) return FtpError::Cancelled;
     std::vector<fs::DirEntry> rows;
-    const FtpError listed =
+    FtpError listed =
         FtpRegistry::Instance().ListFolder(remote, rows, [] { return Cancelled(); });
+    if (listed != FtpError::None && RetryableScanError(listed)) {
+        rows.clear();
+        listed = FtpRegistry::Instance().ListFolder(remote, rows, [] { return Cancelled(); });
+    }
     if (listed != FtpError::None) {
-        // A row the listing already called a folder stays a folder: asking for
-        // its bytes would only turn "denied" into a misleading "not found".
-        if (known_directory) return listed;
-        // The top-level argument may name a single file, which mlsd/list refuse.
-        return FtpRegistry::Instance().Download(remote, local, [] { return Cancelled(); });
+        // The scan root and every row a listing called a folder are folders:
+        // asking for their bytes would only turn "denied" into "not found".
+        if (named_by_row) return listed;
+        // Only the caller's own argument may name a single file, and only a
+        // listing that failed for a "not a folder" reason is worth retrying as
+        // one: a refused or timed-out listing must keep its own code.
+        if (listed != FtpError::NotFound && listed != FtpError::Protocol) return listed;
+        FtpError fetched = FtpRegistry::Instance().Download(remote, local, [] { return Cancelled(); });
+        if (fetched != FtpError::None && RetryableScanError(fetched)) {
+            fetched = FtpRegistry::Instance().Download(remote, local, [] { return Cancelled(); });
+        }
+        return fetched;
     }
     CreateDirectoryW(local.c_str(), nullptr);
     for (const fs::DirEntry& row : rows) {
         if (Cancelled()) return FtpError::Cancelled;
         const std::wstring child = JoinLocal(local, row.name);
-        const FtpError error = row.is_dir
+        FtpError error = row.is_dir
             ? DownloadScanTree(row.full_path, child, skipped, true)
             : FtpRegistry::Instance().Download(row.full_path, child, [] { return Cancelled(); });
+        if (error != FtpError::None && RetryableScanError(error) && !row.is_dir) {
+            error = FtpRegistry::Instance().Download(row.full_path, child, [] { return Cancelled(); });
+        }
         if (error == FtpError::None) continue;
         if (SkippableScanError(error)) {
             ++skipped;
