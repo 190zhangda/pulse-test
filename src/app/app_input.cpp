@@ -1983,8 +1983,10 @@ bool StartChordDrag(AppState& s) {
     if (band) {
         const int row = s.listSelection.row_index;
         if (row < 0 || static_cast<size_t>(row) >= tab->EntryCount()) return false;
+        // The row press already collapsed the selection to that one row; the
+        // drag has to carry what the user had selected before pressing.
+        CancelMarquee(s);
         if (!tab->IsSelected(row)) tab->SelectOnly(row);
-        ResetMarquee(s);
     }
     s.listSelection.EndFile();
     s.deferredFileActivation = false;

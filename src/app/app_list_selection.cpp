@@ -327,7 +327,9 @@ int FinishListBand(AppState& s, POINT point) {
 
 bool CancelMarquee(AppState& s) {
     if (!s.listSelection.BandActive() && !s.listSelection.PendingBand()) return false;
-    if (app::Tab* tab = ActiveTab(s); MarqueeOwnerMatches(s, tab) && s.listSelection.BandActive()) {
+    // A pending band has not changed the selection yet, but the row press that
+    // armed it may have; putting the snapshot back keeps it a no-op there.
+    if (app::Tab* tab = ActiveTab(s); MarqueeOwnerMatches(s, tab)) {
         const bool same_selection = tab->all_selected == s.listSelection.before_all
             ? tab->selected == s.listSelection.before
             : (tab->all_selected ? s.listSelection.before.size() : tab->selected.size()) == tab->EntryCount();
