@@ -18,8 +18,9 @@ namespace ops { struct OpRequest; }
 namespace app {
 
 // ftp_ops.h: the result of the mirror download that precedes a scan of an
-// ftp:// folder.
+// ftp:// folder, and its progress reports.
 struct FtpScanDownloadResult;
+struct FtpScanProgress;
 
 enum class DuplicateScanScope : int {
     Folder = 0,
@@ -115,6 +116,8 @@ private:
 // The recursive download that mirrors an ftp:// folder (ftp_ops.h) finished:
 // point the session at the local copy and run the ordinary scan.
 void ApplyFtpScanDownload(AppState& s, const app::FtpScanDownloadResult& result);
+// WM_FTP_SCAN_PROGRESS: show the mirror's listing or download count.
+void ApplyFtpScanProgress(AppState& s, const app::FtpScanProgress& progress);
 void StartDuplicateScan(AppState& s);
 void CancelDuplicateScan(AppState& s);
 void RecycleDuplicateGroup(AppState& s, size_t group);

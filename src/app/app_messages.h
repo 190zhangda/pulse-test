@@ -121,3 +121,4 @@ constexpr UINT WM_HISTORY_REDO = WM_APP + 144;
 constexpr UINT WM_FTP_CACHE_READY = WM_APP + 145;  // app::FtpCacheResult* (ftp_cache.h): a remote file was fetched
 constexpr UINT WM_FTP_OPS_DONE = WM_APP + 146;     // app::FtpOpResult* (ftp_ops.h): an ftp write finished
 constexpr UINT WM_FTP_SCAN_DOWNLOAD = WM_APP + 147; // app::FtpScanDownloadResult* (ftp_ops.h): a duplicate-scan ftp tree finished downloading
+constexpr UINT WM_FTP_SCAN_PROGRESS = WM_APP + 148; // app::FtpScanProgress* (ftp_ops.h): how far that mirror has got

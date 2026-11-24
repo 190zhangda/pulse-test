@@ -3,6 +3,7 @@
 #include <atomic>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 
 #include "app_messages.h"
 #include "ftp_registry.h"
@@ -15,9 +16,19 @@ namespace {
 
 std::atomic<bool> stopping{false};
 std::atomic<int> active{0};  // requests still running
+// The duplicate-scan mirror that is allowed to keep going. A newer scan, or
+// the tab's 取消, moves it away from the running one, which then stops between
+// listings, files and transfer chunks instead of holding the server.
+std::atomic<uint64_t> scan_owner{0};
 
 // The app is going away: long uploads give up between files.
 bool Cancelled() { return stopping.load(); }
+
+// True when `generation` is no longer the scan the app wants: it was cancelled
+// or replaced by a newer one.
+bool ScanStopped(uint64_t generation) {
+    return stopping.load() || scan_owner.load() != generation;
+}
 
 // The URL of `name` inside `folder` (canonical text: no password).
 std::wstring ChildUrl(const std::wstring& folder, const std::wstring& name) {
@@ -134,60 +145,269 @@ bool RetryableTransferError(FtpError error) {
     return error == FtpError::Network || error == FtpError::Timeout;
 }
 
-// Recursively mirrors an ftp:// folder into a local directory so the
-// Pulse.Content duplicate scanner (Win32 paths only) can read it. `remote` on
-// the first call carries the password; child URLs from ListFolder are
+// ---- the duplicate scanner's mirror ----
+
+// A file the listings named. The download phase needs every size before it can
+// tell which rows can be duplicates.
+struct ScanFile {
+    std::wstring remote;
+    std::wstring local;
+    uint64_t size = 0;  // 0 when the listing did not say
+    FILETIME mtime{};   // the server's own time, when the listing carried one
+    bool has_mtime = false;
+};
+
+// What the mirror did, for the log and for the caller's report.
+struct ScanStats {
+    uint64_t listed = 0;      // files the listings named
+    uint64_t skipped = 0;     // rows the account may not read, or that failed
+    uint64_t candidates = 0;  // rows that share a size: the only possible duplicates
+    uint64_t unique = 0;      // sizes no other row shares: never duplicates
+    uint64_t reused = 0;      // already on disk from an earlier scan
+    uint64_t fetched = 0;     // transferred this time
+    uint64_t pruned = 0;      // left over from an earlier scan, now gone
+};
+
+// Sends the mirror's progress to the duplicate-scan window, throttled: a phone
+// can name thousands of rows, and every one of them would otherwise repaint.
+struct ScanReporter {
+    HWND window = nullptr;
+    uint64_t generation = 0;
+    uint64_t last_post = 0;
+
+    void Send(uint64_t listed, uint64_t files, uint64_t bytes, uint64_t total,
+              bool listing_done, bool force) {
+        if (!window || Cancelled()) return;
+        const uint64_t now = GetTickCount64();
+        if (!force && now - last_post < 200) return;
+        last_post = now;
+        auto* progress = new FtpScanProgress;
+        progress->generation = generation;
+        progress->listed = listed;
+        progress->files = files;
+        progress->bytes = bytes;
+        progress->total = total;
+        progress->listing_done = listing_done;
+        if (!PostMessageW(window, WM_FTP_SCAN_PROGRESS, 0, reinterpret_cast<LPARAM>(progress)))
+            delete progress;
+    }
+};
+
+// Walks the ftp:// tree with listings only. A listing costs a round trip; a
+// transfer costs its bytes, so knowing the whole tree first is what lets the
+// download phase touch only the rows that can possibly be duplicates. `remote`
+// on the first call carries the password; child URLs from ListFolder are
 // canonical, which reuse the logged-in connection held by the registry.
-// `skipped` counts the rows left out, so the caller can say how complete the
-// mirror is instead of pretending it is whole.
-FtpError DownloadScanTree(const std::wstring& remote, const std::wstring& local,
-                          uint64_t& skipped, bool named_by_row = false,
-                          bool named_by_caller = false,
-                          uint64_t minimum_bytes = 0) {
-    if (Cancelled()) return FtpError::Cancelled;
+FtpError CollectScanTree(const std::wstring& remote, const std::wstring& local,
+                         ScanStats& stats, uint64_t minimum_bytes,
+                         std::vector<ScanFile>& files, bool named_by_row,
+                         bool named_by_caller, ScanReporter& reporter,
+                         uint64_t& total_bytes) {
+    const uint64_t generation = reporter.generation;
+    if (ScanStopped(generation)) return FtpError::Cancelled;
     std::vector<fs::DirEntry> rows;
-    FtpError listed =
-        FtpRegistry::Instance().ListFolder(remote, rows, [] { return Cancelled(); });
+    FtpError listed = FtpRegistry::Instance().ListFolder(
+        remote, rows, [generation] { return ScanStopped(generation); });
     if (listed != FtpError::None && RetryableListError(listed)) {
         rows.clear();
-        listed = FtpRegistry::Instance().ListFolder(remote, rows, [] { return Cancelled(); });
+        listed = FtpRegistry::Instance().ListFolder(
+            remote, rows, [generation] { return ScanStopped(generation); });
     }
     if (listed != FtpError::None) {
         // The scan root and every row a listing called a folder are folders:
         // asking for their bytes would only turn "denied" into "not found".
         if (named_by_row || !named_by_caller) return listed;
         // The caller's own argument may still name a single file, which list
-        // refuses; only a "not a folder" answer is worth fetching as bytes.
+        // refuses; a "not a folder" answer means it is a file to fetch.
         if (listed != FtpError::NotFound) return listed;
-        FtpError fetched = FtpRegistry::Instance().Download(remote, local, [] { return Cancelled(); });
-        if (fetched != FtpError::None && RetryableTransferError(fetched)) {
-            fetched = FtpRegistry::Instance().Download(remote, local, [] { return Cancelled(); });
-        }
-        return fetched;
+        ScanFile file;
+        file.remote = remote;
+        file.local = local;
+        files.push_back(std::move(file));
+        ++stats.listed;
+        reporter.Send(stats.listed, 0, total_bytes, 0, false, false);
+        return FtpError::None;
     }
     CreateDirectoryW(local.c_str(), nullptr);
     for (const fs::DirEntry& row : rows) {
-        if (Cancelled()) return FtpError::Cancelled;
+        if (ScanStopped(generation)) return FtpError::Cancelled;
         const std::wstring child = JoinLocal(local, row.name);
         // The scanner drops anything under its minimum size, so copying such a
         // row would only spend the link's time on a file nobody looks at.
         if (!row.is_dir && minimum_bytes != 0 && row.size != 0 && row.size < minimum_bytes)
             continue;
-        FtpError error = row.is_dir
-            ? DownloadScanTree(row.full_path, child, skipped, true, false, minimum_bytes)
-            : FtpRegistry::Instance().Download(row.full_path, child, [] { return Cancelled(); });
-        if (error != FtpError::None && RetryableTransferError(error) && !row.is_dir) {
-            error = FtpRegistry::Instance().Download(row.full_path, child, [] { return Cancelled(); });
+        if (row.is_dir) {
+            const FtpError error = CollectScanTree(row.full_path, child, stats, minimum_bytes,
+                                                   files, true, false, reporter, total_bytes);
+            if (error == FtpError::None) continue;
+            if (SkippableScanError(error)) {
+                ++stats.skipped;
+                // A folder that could not be read leaves nothing to compare.
+                RemoveDirectoryW(child.c_str());
+                continue;
+            }
+            return error;
         }
-        if (error == FtpError::None) continue;
-        if (SkippableScanError(error)) {
-            ++skipped;
-            // A folder that could not be read leaves nothing behind to compare.
-            if (row.is_dir) RemoveDirectoryW(child.c_str());
+        ScanFile file;
+        file.remote = row.full_path;
+        file.local = child;
+        file.size = row.size;
+        file.mtime = row.mtime;
+        file.has_mtime = row.mtime.dwLowDateTime != 0 || row.mtime.dwHighDateTime != 0;
+        total_bytes += row.size;
+        files.push_back(std::move(file));
+        ++stats.listed;
+        reporter.Send(stats.listed, 0, total_bytes, 0, false, false);
+    }
+    return FtpError::None;
+}
+
+FILETIME ScanStamp() {
+    FILETIME now{};
+    GetSystemTimeAsFileTime(&now);
+    return now;
+}
+
+// Marks a mirrored row as kept by this scan (its creation time becomes the
+// scan's start) and, when the listing named the server's time, makes the local
+// copy carry it. The next scan can then tell an unchanged row from one the
+// server replaced with different bytes of the same length.
+void TouchMirror(const ScanFile& file, const FILETIME& stamp) {
+    HANDLE handle = CreateFileW(file.local.c_str(), FILE_WRITE_ATTRIBUTES,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return;
+    SetFileTime(handle, &stamp, nullptr, file.has_mtime ? &file.mtime : nullptr);
+    CloseHandle(handle);
+}
+
+// True when an earlier scan already left this row on disk unchanged: a second
+// scan then only has to list the tree, not fetch it again.
+bool LocalCopyMatches(const ScanFile& file) {
+    if (file.size == 0) return false;
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (!GetFileAttributesExW(file.local.c_str(), GetFileExInfoStandard, &data)) return false;
+    const uint64_t on_disk = (static_cast<uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+    if (on_disk != file.size) return false;
+    // A size alone cannot tell an unchanged row from one the server rewrote in
+    // place; compare the server's time when the listing carried it.
+    if (!file.has_mtime) return true;
+    return CompareFileTime(&data.ftLastWriteTime, &file.mtime) == 0;
+}
+
+// True for a file this scan kept. Creation time is the marker, and the margin
+// covers file systems that store it with a coarser clock than NTFS (FAT rounds
+// to 10 ms, some network shares to 2 s).
+bool SeenThisScan(const FILETIME& created, const FILETIME& stamp) {
+    ULARGE_INTEGER start;
+    start.LowPart = stamp.dwLowDateTime;
+    start.HighPart = stamp.dwHighDateTime;
+    // 100 ns units: two seconds.
+    start.QuadPart = start.QuadPart > 20000000ull ? start.QuadPart - 20000000ull : 0;
+    FILETIME threshold{};
+    threshold.dwLowDateTime = start.LowPart;
+    threshold.dwHighDateTime = start.HighPart;
+    return CompareFileTime(&created, &threshold) >= 0;
+}
+
+// Drops every mirrored file this scan did not keep: an extra copy the user has
+// since deleted, or a row that changed size, must not come back as a duplicate
+// that cannot be removed.
+void PruneMirror(const std::wstring& directory, const FILETIME& stamp, uint64_t& removed) {
+    WIN32_FIND_DATAW found{};
+    HANDLE search = FindFirstFileW(JoinLocal(directory, L"*").c_str(), &found);
+    if (search == INVALID_HANDLE_VALUE) return;
+    std::vector<std::wstring> children;
+    do {
+        if (wcscmp(found.cFileName, L".") == 0 || wcscmp(found.cFileName, L"..") == 0) continue;
+        children.emplace_back(found.cFileName);
+    } while (FindNextFileW(search, &found));
+    FindClose(search);
+    for (const std::wstring& name : children) {
+        const std::wstring child = JoinLocal(directory, name);
+        if (IsDirectory(child)) {
+            PruneMirror(child, stamp, removed);
+            RemoveDirectoryW(child.c_str());  // only succeeds once it is empty
             continue;
         }
-        return error;
+        WIN32_FILE_ATTRIBUTE_DATA data{};
+        if (!GetFileAttributesExW(child.c_str(), GetFileExInfoStandard, &data)) continue;
+        if (SeenThisScan(data.ftCreationTime, stamp)) continue;
+        DeleteFileW(child.c_str());
+        ++removed;
     }
+}
+
+// Mirrors an ftp:// folder into `local_root` so the duplicate scanner, which
+// only reads Win32 paths, can compare it. Two passes: list the whole tree, then
+// fetch only the rows whose size another row shares. Sizes on a phone's card
+// are mostly unique, so the second pass touches a small part of the first, and
+// a scan the user repeats only lists what an earlier one already fetched.
+FtpError MirrorForScan(const std::wstring& remote, const std::wstring& local_root,
+                       ScanStats& stats, uint64_t minimum_bytes, HWND window,
+                       uint64_t generation) {
+    const FILETIME stamp = ScanStamp();
+    ScanReporter reporter{window, generation};
+    uint64_t total_bytes = 0;
+    std::vector<ScanFile> files;
+    const FtpError collected = CollectScanTree(remote, local_root, stats, minimum_bytes, files,
+                                               false, true, reporter, total_bytes);
+    if (collected != FtpError::None) return collected;
+    stats.listed = files.size();
+    // Rows the listing gave a size for, bucketed by it: a bucket that holds a
+    // single row cannot be a duplicate of anything in this tree.
+    std::unordered_map<uint64_t, uint32_t> shared;
+    for (const ScanFile& file : files) {
+        if (file.size != 0) ++shared[file.size];
+    }
+    uint64_t candidates = 0;
+    for (const ScanFile& file : files) {
+        if (file.size == 0) {
+            ++candidates;  // no size: the listing cannot rule it out
+            continue;
+        }
+        const auto bucket = shared.find(file.size);
+        if (bucket != shared.end() && bucket->second >= 2) ++candidates;
+    }
+    stats.candidates = candidates;
+    reporter.Send(stats.listed, 0, total_bytes, candidates, true, true);
+
+    uint64_t handled = 0;
+    uint64_t handled_bytes = 0;
+    for (const ScanFile& file : files) {
+        if (ScanStopped(generation)) return FtpError::Cancelled;
+        if (file.size != 0) {
+            const auto bucket = shared.find(file.size);
+            if (bucket != shared.end() && bucket->second < 2) {
+                ++stats.unique;
+                continue;
+            }
+        }
+        if (LocalCopyMatches(file)) {
+            TouchMirror(file, stamp);
+            ++stats.reused;
+        } else {
+            FtpError error = FtpRegistry::Instance().Download(
+                file.remote, file.local, [generation] { return ScanStopped(generation); });
+            if (error != FtpError::None && RetryableTransferError(error)) {
+                error = FtpRegistry::Instance().Download(
+                    file.remote, file.local, [generation] { return ScanStopped(generation); });
+            }
+            if (error == FtpError::None) {
+                TouchMirror(file, stamp);
+                ++stats.fetched;
+            } else if (SkippableScanError(error)) {
+                ++stats.skipped;
+            } else {
+                return error;
+            }
+        }
+        ++handled;
+        handled_bytes += file.size;
+        reporter.Send(stats.listed, handled, handled_bytes, candidates, true, false);
+    }
+    PruneMirror(local_root, stamp, stats.pruned);
+    reporter.Send(stats.listed, handled, handled_bytes, candidates, true, true);
     return FtpError::None;
 }
 
@@ -311,22 +531,33 @@ bool FtpOps::DownloadForScan(const std::wstring& credentials_url,
                              const std::wstring& local_root, HWND window,
                              uint64_t generation, uint64_t minimum_bytes) {
     if (credentials_url.empty() || local_root.empty() || !window) return false;
+    // A newer scan replaces the one before it: the older one stops as soon as
+    // it notices that it no longer owns the server.
+    scan_owner.store(generation);
     stopping.store(false);
     active.fetch_add(1);
     std::thread([credentials_url, local_root, window, generation, minimum_bytes]() {
-        uint64_t skipped = 0;
+        const uint64_t started = GetTickCount64();
+        ScanStats stats;
         const FtpError error =
-            DownloadScanTree(credentials_url, local_root, skipped, false, true, minimum_bytes);
+            MirrorForScan(credentials_url, local_root, stats, minimum_bytes, window, generation);
         diagnostics::runtime::Event("ftp_scan_download",
                                     {{"error", static_cast<uint64_t>(error)},
                                      {"generation", generation},
-                                     {"skipped", skipped}});
+                                     {"listed", stats.listed},
+                                     {"candidates", stats.candidates},
+                                     {"unique", stats.unique},
+                                     {"reused", stats.reused},
+                                     {"fetched", stats.fetched},
+                                     {"skipped", stats.skipped},
+                                     {"pruned", stats.pruned},
+                                     {"ms", GetTickCount64() - started}});
         if (!stopping.load()) {
             auto* done = new FtpScanDownloadResult;
             done->local_root = local_root;
             done->generation = generation;
             done->error = static_cast<uint8_t>(error);
-            done->skipped = skipped;
+            done->skipped = stats.skipped;
             if (!PostMessageW(window, WM_FTP_SCAN_DOWNLOAD, 0,
                               reinterpret_cast<LPARAM>(done)))
                 delete done;
@@ -334,6 +565,13 @@ bool FtpOps::DownloadForScan(const std::wstring& credentials_url,
         active.fetch_sub(1);
     }).detach();
     return true;
+}
+
+void FtpOps::CancelScan(uint64_t generation) {
+    // Only the scan that still owns the mirror can be stopped this way; a
+    // newer scan must not be cancelled by an old tab's button.
+    uint64_t expected = generation;
+    scan_owner.compare_exchange_strong(expected, 0);
 }
 
 void FtpOps::SetCopied(std::vector<std::wstring> urls) {

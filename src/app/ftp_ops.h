@@ -43,6 +43,20 @@ struct FtpOpResult {
     std::vector<std::wstring> sources;
 };
 
+// How far the mirror that precedes a duplicate scan has got. The scan lists the
+// whole tree first and only then fetches the rows that can be duplicates, so
+// the view can show the listing's file count while the server answers folder
+// after folder. Posted as WM_FTP_SCAN_PROGRESS; `generation` drops a report
+// that belongs to a cancelled or replaced scan.
+struct FtpScanProgress {
+    uint64_t generation = 0;
+    uint64_t listed = 0;         // files the listings have named so far
+    uint64_t files = 0;          // rows handled by the download pass
+    uint64_t bytes = 0;          // listed bytes, then fetched bytes
+    uint64_t total = 0;          // rows the download pass will handle (0 while listing)
+    bool listing_done = false;
+};
+
 // Result of the recursive download that precedes a duplicate scan of an ftp://
 // folder. `generation` lets the window ignore a download that finished after
 // the user cancelled or started a different scan.
@@ -66,14 +80,22 @@ public:
     // Waits for the running request (the app is going away).
     void Shutdown();
 
-    // Recursively downloads a whole ftp:// folder into `local_root` for the
-    // duplicate scanner (which only reads Win32 paths). Posts
-    // WM_FTP_SCAN_DOWNLOAD to `window` with a heap FtpScanDownloadResult when
-    // it finishes; `generation` is echoed back so a stale result is ignored.
+    // Mirrors an ftp:// folder into `local_root` for the duplicate scanner
+    // (which only reads Win32 paths): it lists the whole tree first and then
+    // fetches only the files whose size another file shares, which are the
+    // only ones that can be duplicates. Files an earlier scan left unchanged
+    // are not fetched again. Posts WM_FTP_SCAN_DOWNLOAD to `window` with a heap
+    // FtpScanDownloadResult when it finishes, and WM_FTP_SCAN_PROGRESS while it
+    // runs; `generation` is echoed back so a stale result is ignored.
     // `credentials_url` must carry the password for the first connection.
     bool DownloadForScan(const std::wstring& credentials_url,
                          const std::wstring& local_root, HWND window,
                          uint64_t generation, uint64_t minimum_bytes = 0);
+
+    // Stops the mirror `DownloadForScan` started as `generation` (the tab's
+    // 取消): it checks this between listings, files and transfer chunks, so a
+    // cancelled scan does not keep the server busy for the next one.
+    void CancelScan(uint64_t generation);
 
     // Ctrl+C on a server's rows: the URLs a later paste into a local folder
     // fetches. Pulse keeps them here because the Windows clipboard is about

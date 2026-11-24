@@ -219,10 +219,28 @@ void ApplyFtpScanDownload(AppState& s, const app::FtpScanDownloadResult& result)
     RunDuplicateSearch(s, {result.local_root});
 }
 
+void ApplyFtpScanProgress(AppState& s, const app::FtpScanProgress& progress) {
+    auto& session = s.duplicateScan;
+    if (progress.generation != session.generation || !session.IsFtpScan() ||
+        !session.scanning)
+        return;
+    // The listing phase cannot know how many rows exist yet, so its count is
+    // the files named so far; the download phase knows its (much smaller)
+    // candidate set and reports against it.
+    session.scanned_files = progress.listing_done ? progress.files : progress.listed;
+    session.total_files = progress.listing_done ? progress.total : 0;
+    session.scanned_bytes = progress.bytes;
+    session.current_root = session.ftp_source_root;
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
 void CancelDuplicateScan(AppState& s) {
     s.duplicateSearch.Cancel();
-    // A mirror download may still be running: bumping the generation makes its
-    // result stale, so a cancelled scan cannot start one moment later.
+    // A mirror download may still be running: tell it to stop, then bumping the
+    // generation makes any result it still posts stale, so a cancelled scan
+    // cannot start one moment later.
+    if (s.duplicateScan.scanning && s.duplicateScan.IsFtpScan())
+        app::FtpOps::Instance().CancelScan(s.duplicateScan.generation);
     if (s.duplicateScan.scanning) s.duplicateScan.generation += 1;
     s.duplicateScan.scanning = false;
     InvalidateRect(s.hwnd, nullptr, FALSE);
