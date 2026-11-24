@@ -2,6 +2,7 @@
 #include "drag_drop.h"
 #include "../fs/fs_recycle.h"
 #include "../common/shell_id.h"
+#include "../common/runtime_log.h"
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
@@ -678,10 +679,19 @@ DWORD DoFileDragDrop(const std::vector<std::wstring>& paths, DWORD allowed_effec
     if (FAILED(CreateShellFilesDataObject(paths, &data)) || !data) {
         // Shell item ids have no CF_HDROP form: without the shell's object
         // there is nothing a target could read.
-        if (IsShellItemId(paths.front())) return DROPEFFECT_NONE;
+        if (IsShellItemId(paths.front())) {
+            diagnostics::runtime::Event("file_drag_data",
+                {{"shell", 0ull}, {"rejected", 1ull}, {"count", paths.size()}});
+            return DROPEFFECT_NONE;
+        }
         fallback = FileDataObject::Create(paths);
         data = fallback;
+        diagnostics::runtime::Event("file_drag_data",
+            {{"shell", 0ull}, {"rejected", 0ull}, {"count", paths.size()},
+             {"fallback", fallback ? 1ull : 0ull}});
     } else {
+        diagnostics::runtime::Event("file_drag_data",
+            {{"shell", 1ull}, {"rejected", 0ull}, {"count", paths.size()}});
         FORMATETC fmt{ (CLIPFORMAT)PreferredEffectFormat(), nullptr, DVASPECT_CONTENT, -1,
                        TYMED_HGLOBAL };
         STGMEDIUM medium{};

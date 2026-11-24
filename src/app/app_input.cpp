@@ -1173,6 +1173,8 @@ void StartDragOut(AppState& s) {
     // A phone's rows drag their shell items (Explorer's MTP data object), so
     // the desktop, Explorer and Pulse's own panes all copy them over WPD.
     std::vector<std::wstring> paths = device ? SelectedShellIds(*tab) : SelectedFullPaths(*tab);
+    diagnostics::runtime::Event("file_drag_paths",
+        {{"count", static_cast<uint64_t>(paths.size())}, {"device", device ? 1ull : 0ull}});
     if (paths.empty()) return;
     if (!device)
         for (auto& path : paths) path = ClipboardPath(path);
@@ -1187,6 +1189,7 @@ void StartDragOut(AppState& s) {
     SetPaneLayoutDragSource(s.pane);
     DWORD effect = ui::DoFileDragDrop(paths, allowed, {}, source_path, s.darkMode);
     SetPaneLayoutDragSource(nullptr);
+    diagnostics::runtime::Event("file_drag_end", {{"effect", static_cast<uint64_t>(effect)}});
     if (effect == DROPEFFECT_NONE && s.springEntered) {
         s.dragReturnPath = source_path;
         s.dragReturnPaths = paths;
@@ -3390,17 +3393,13 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             app::Tab* tab = ActiveTab(*s);
-            // Text starts a file drag; all non-text row space starts a marquee,
-            // including whitespace in an already selected row.
-            if (tab && !IsSettingsTab(tab) && !PointInHitItemGrip(*s, vm, hit, static_cast<float>(mx), static_cast<float>(my))) {
-                BeginListBand(*s, tab, POINT{mx, my}, hit.index, ctrl, shift);
-                ArmFileClick(*s, vm, hit, tab, ctrl, shift, pressActivates);
-                s->blankClickPane = s->pane;
-                s->blankClickGeneration = tab->view_generation;
-                SetCapture(hwnd);
-                InvalidateRect(hwnd, nullptr, FALSE);
-                return 0;
-            }
+            // Explorer parity: a press anywhere on the row - the icon, the name,
+            // or the empty cell space to its right - arms the file press, so a
+            // drag can start from the whole row. A selection rectangle starts in
+            // the blank space below the rows (the blank-hit branch).
+            const bool item_grip = PointInHitItemGrip(*s, vm, hit, static_cast<float>(mx), static_cast<float>(my));
+            diagnostics::runtime::Event("file_press",
+                {{"index", static_cast<uint64_t>(hit.index)}, {"grip", item_grip ? 1ull : 0ull}});
             // Single click opens: no slow-click rename (F2 still renames).
             const bool renameCandidate = !pressActivates && !s->appPrefs.single_click_open && !ctrl && !shift && (GetKeyState(VK_MENU) & 0x8000) == 0 && tab && !tab->net_readonly &&
                 s->renameIndex < 0 && tab->SelectedCount() == 1 &&
