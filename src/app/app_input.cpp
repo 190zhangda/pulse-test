@@ -1787,6 +1787,9 @@ struct BlankWindowDrag {
     POINT start{};
 };
 BlankWindowDrag g_blank_drag;
+// A drag-out started by holding the left button and pressing the right one;
+// the right-button release that follows belongs to that drag, not to a menu.
+bool g_drag_chord = false;
 
 BlankChrome BlankChromeAt(AppState& s, const ui::HitTestResult& hit, int mx, int my) {
     if (!s.hwnd) return BlankChrome::None;
@@ -1965,6 +1968,31 @@ bool RestoreBlankDeselect(AppState& s, POINT client, bool maximizing) {
     tab->selected = std::move(undo.selected);
     tab->selected_index = undo.index;
     if (s.hwnd) InvalidateRect(s.hwnd, nullptr, FALSE);
+    return true;
+}
+
+// Left + right together: the pointer explicitly asked for a drag-out. Both a
+// pending row press and a pending marquee on a row qualify, so the gesture
+// works from the name, the icon or the blank cell space of the row.
+bool StartChordDrag(AppState& s) {
+    app::Tab* tab = ActiveTab(s);
+    if (!tab || !s.hwnd) return false;
+    const bool file = s.listSelection.PendingFile();
+    const bool band = s.listSelection.PendingBand();
+    if (!file && !band) return false;
+    if (band) {
+        const int row = s.listSelection.row_index;
+        if (row < 0 || static_cast<size_t>(row) >= tab->EntryCount()) return false;
+        if (!tab->IsSelected(row)) tab->SelectOnly(row);
+        ResetMarquee(s);
+    }
+    s.listSelection.EndFile();
+    s.deferredFileActivation = false;
+    CancelFileClick(s);
+    if (GetCapture() == s.hwnd) ReleaseCapture();
+    g_drag_chord = true;
+    diagnostics::runtime::Event("file_drag_chord", {{"band", band ? 1ull : 0ull}});
+    StartDragOut(s);
     return true;
 }
 
@@ -2786,6 +2814,11 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             }
         }
 
+        // Left and right held together: the pointer asked for a drag-out.
+        if ((GetKeyState(VK_LBUTTON) & 0x8000) != 0 && (GetKeyState(VK_RBUTTON) & 0x8000) != 0 &&
+            StartChordDrag(*s))
+            return 0;
+
         if (s->listSelection.PendingBand() || s->listSelection.BandActive()) {
             if (!MarqueeOwnerMatches(*s, ActiveTab(*s))) {
                 ResetMarquee(*s);
@@ -2830,19 +2863,13 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 if (GetCapture() == hwnd) ReleaseCapture();
                 return 0;
             }
+            // Moving with the left button alone keeps the click/selection: the
+            // drag-out gesture is the left+right chord, handled above.
             if ((GetKeyState(VK_LBUTTON) & 0x8000) == 0) {
                 FinishListRowClick(*s);
                 s->listSelection.EndFile();
                 s->deferredFileActivation = false;
                 CancelFileClick(*s);
-            } else if (std::abs(mx - s->listSelection.file_start.x) >= ListDragSlop(*s, SM_CXDRAG, true) ||
-                       std::abs(my - s->listSelection.file_start.y) >= ListDragSlop(*s, SM_CYDRAG, true)) {
-                s->listSelection.EndFile();
-                s->deferredFileActivation = false;
-                CancelFileClick(*s);
-                diagnostics::runtime::Event("file_drag_start", {{"rebases", s->listSelection.file_rebases}});
-                StartDragOut(*s);
-                return 0;
             }
         }
 
@@ -3073,6 +3100,7 @@ static void ClickGroupHeader(AppState& s, int pane_slot, int group, bool select)
 
 LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        g_drag_chord = false;   // a fresh press starts a fresh gesture
         const bool deferredActivation = s->deferredFileActivation;
         const bool old_list_press = s->listSelection.PendingBand() || s->listSelection.BandActive() ||
             s->listSelection.PendingFile();
@@ -3393,13 +3421,20 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             app::Tab* tab = ActiveTab(*s);
-            // Explorer parity: a press anywhere on the row - the icon, the name,
-            // or the empty cell space to its right - arms the file press, so a
-            // drag can start from the whole row. A selection rectangle starts in
-            // the blank space below the rows (the blank-hit branch).
+            // Text starts a file drag; all non-text row space starts a marquee,
+            // including whitespace in an already selected row.
             const bool item_grip = PointInHitItemGrip(*s, vm, hit, static_cast<float>(mx), static_cast<float>(my));
             diagnostics::runtime::Event("file_press",
                 {{"index", static_cast<uint64_t>(hit.index)}, {"grip", item_grip ? 1ull : 0ull}});
+            if (tab && !IsSettingsTab(tab) && !item_grip) {
+                BeginListBand(*s, tab, POINT{mx, my}, hit.index, ctrl, shift);
+                ArmFileClick(*s, vm, hit, tab, ctrl, shift, pressActivates);
+                s->blankClickPane = s->pane;
+                s->blankClickGeneration = tab->view_generation;
+                SetCapture(hwnd);
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
             // Single click opens: no slow-click rename (F2 still renames).
             const bool renameCandidate = !pressActivates && !s->appPrefs.single_click_open && !ctrl && !shift && (GetKeyState(VK_MENU) & 0x8000) == 0 && tab && !tab->net_readonly &&
                 s->renameIndex < 0 && tab->SelectedCount() == 1 &&
@@ -4797,6 +4832,9 @@ LRESULT HandleCaptureChanged(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LP
 
 LRESULT HandleRButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        // Left already held: the right button turns the press into a drag-out
+        // instead of opening the context menu.
+        if ((GetKeyState(VK_LBUTTON) & 0x8000) != 0 && StartChordDrag(*s)) return 0;
         if (!s->workspaceRenameRoot.empty()) HideWorkspaceRenameOverlay(*s, true);
         if (AiAssistantMouseOther(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) return 0;   // Pulse 助手
         DismissPathEditorOutside(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
@@ -4841,6 +4879,10 @@ LRESULT HandleRButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
 LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        if (g_drag_chord) {   // this release belongs to the left+right drag
+            g_drag_chord = false;
+            return 0;
+        }
         if (AiAssistantMouseOther(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) {   // Pulse 助手
             AiAssistantContextMenu(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             return 0;

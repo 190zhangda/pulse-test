@@ -532,14 +532,13 @@ void CheckItemGrip(AppState& s, Report& log) {
         const int x=static_cast<int>(cell.left+(cell.right-cell.left)*0.65f);
         const int y=static_cast<int>((cell.top+cell.bottom)*0.5f);
         HandleLButtonDown(&s,s.hwnd,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(x,y));
-        log.Check(s.listSelection.PendingFile() && !s.listSelection.PendingBand(),
-            "pressing a selected row anywhere arms a file drag");
+        log.Check(s.listSelection.PendingBand() && !s.listSelection.PendingFile(),
+            "pressing selected non-text area arms marquee instead of dragging files");
         ReleaseCapture();
         HandleCaptureChanged(&s,s.hwnd,WM_CAPTURECHANGED,0,0);
         tab->ClearSelection();
         HandleLButtonDown(&s,s.hwnd,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(x,y));
-        log.Check(s.listSelection.PendingFile() && !s.listSelection.PendingBand(),
-            "pressing an unselected row anywhere arms a file drag");
+        log.Check(s.listSelection.PendingBand() && !s.listSelection.PendingFile(),"pressing unselected row whitespace arms marquee");
         ReleaseCapture();
         HandleCaptureChanged(&s,s.hwnd,WM_CAPTURECHANGED,0,0);
     }
